@@ -1,0 +1,35 @@
+[task]
+name = "bin-packing"
+description = '''
+Bin packing. Edit `solver.py` so that `solve(sizes: list[int], capacity: int) -> list[list[int]]`
+packs items into as few bins as possible.
+
+Input: `sizes[i]` is the positive integer size of item `i` (0-based); every size is at most
+`capacity`.
+
+Output: a list of bins, each bin a list of item indices. Every index in `range(len(sizes))` must
+appear in exactly one bin, and the sizes of the items in one bin must add up to at most `capacity`.
+Indices must be plain Python ints. Empty bins are ignored. Any other output makes the candidate
+invalid.
+
+Rules: Python 3.11+ and the standard library only. `solve` is called once per instance in a single
+fresh Python process; the whole benchmark must finish within 30 seconds in total, otherwise the
+candidate is invalid.
+
+Benchmark: the same hidden set of 24 instances is used for every candidate. They have between 100
+and 1000 items and come from several different item-size distributions.
+
+Objective (maximize): score = 100 * mean over the instances of (lower_bound / bins_used), where
+lower_bound = ceil(sum(sizes) / capacity). A score of 100 means every instance used exactly
+lower_bound bins. The feedback reports the average per distribution and the three worst instances.
+'''
+seed = "seed"
+editable = ["solver.py"]
+
+[judge]
+run = "python3 \"$LETHE_TASK_DIR/judge/score.py\""
+direction = "max"
+timeout = 120
+
+[budget]
+usd = 5.0

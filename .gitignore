@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+.DS_Store
+
+# run artifacts (events, archives, agent workspaces, transcripts)
+.lethe/
+research/runs/
+
+# third-party task sources fetched at setup time (never vendored: see research/tasks/*/fetch.sh)
+research/tasks/*/vendor/

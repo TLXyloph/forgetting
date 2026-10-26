@@ -1,0 +1,69 @@
+# Bets: alternative forgetting policies on the toy maximum-independent-set task, at the same
+# matched budget as paper-toy-mis (3 USD per run, Claude Haiku, three replicates). Every arm is a
+# team of four agents that see each other's candidates; they differ only in when and how they
+# forget. `team` never forgets and `team-forget` is the paper's schedule, so the natural
+# reference arm is team-forget:
+#
+#   python -m research.matrix research/config/experiments/bets-toy-mis.toml
+#   python -m research.analyze research/runs/bets-toy-mis --ref team-forget --compare anchored:team-forget
+#   python -m research.bandit research/config/experiments/bets-toy-mis.toml --pulls 12
+
+name = "bets-toy-mis"
+task = "../../tasks/toy-mis/lethe.toml"
+replicates = 3
+
+[overrides]
+budget = { usd = 3.0 }
+agent = { model = "haiku" }
+
+# No forgetting at all: the sessions and the candidate history keep growing.
+[[arms]]
+name = "team"
+preset = "team"
+
+# The paper's schedule: the whole team forgets at 25%, 50% and 75% of the budget.
+[[arms]]
+name = "team-forget"
+preset = "team-forget"
+
+# Forget when the sessions look anchored: at least half of the agents now make edits at most 0.3x
+# the size of their first few, and the team best has stalled (instead of forgetting on a schedule).
+[[arms]]
+name = "anchored"
+preset = "team"
+overrides = { forget = { when = [ { type = "anchored", ratio = 0.3, warmup = 4, window = 4, quorum = 0.5, require_stall = true, min_proposals = 8 } ] } }
+
+# Agent-scope forgetting: an agent that was empty or claimed a plateau in 3 of its last 5 turns
+# forgets alone, while the rest of the team keeps its sessions.
+[[arms]]
+name = "stalled"
+preset = "team"
+overrides = { forget = { when = [ { type = "stalled", n = 3, of = 5 } ] } }
+
+# The paper's schedule, but half of the agents restart from near-best "elite" candidates that beat
+# the best on some individual case, instead of from the single best (experimental). This needs
+# per-case scores from the judge; without them it behaves exactly like the paper's policy.
+[[arms]]
+name = "hedged"
+preset = "team-forget"
+overrides = { forget = { seed = "hedged" } }
+
+# The paper's schedule, but a forget also discards the scratch files an agent left next to the
+# best candidate (the paper carries them over).
+[[arms]]
+name = "clean-forget"
+preset = "team-forget"
+overrides = { forget = { carry_scratch = false } }
+
+# No scheduled forgetting, but every turn starts a fresh session: the candidate history stays
+# visible, only the conversation is dropped.
+[[arms]]
+name = "fresh-every-turn"
+preset = "team"
+overrides = { team = { session = "fresh" } }
+
+# Forget when the team best stops improving: no gain in the last 8 proposals of the round.
+[[arms]]
+name = "plateau"
+preset = "team"
+overrides = { forget = { when = [ { type = "plateau", window = 8, min_gain = 0.0, min_proposals = 8 } ] } }

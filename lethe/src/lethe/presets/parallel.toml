@@ -1,0 +1,7 @@
+# Four independent agents splitting the budget (the paper's "4 parallel agents").
+[team]
+agents = 4
+peers = "none"
+
+[forget]
+when = []

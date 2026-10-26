@@ -1,0 +1,7 @@
+# One agent, one continuous session (the paper's "1 agent" baseline).
+[team]
+agents = 1
+peers = "none"
+
+[forget]
+when = []

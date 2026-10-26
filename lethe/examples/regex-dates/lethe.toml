@@ -1,0 +1,41 @@
+[task]
+name = "regex-dates"
+description = '''
+Write one regular expression (Python `re` syntax) that matches exactly the valid dates written in
+the three formats below and nothing else. Edit `pattern.txt`: it holds the pattern, with no
+delimiters or flags; line breaks at the end of the file are not part of it.
+
+Formats (day and month are always two digits with a leading zero, the year always four digits,
+and all digits are ASCII `0`-`9`):
+  YYYY-MM-DD    2024-01-31
+  DD/MM/YYYY    31/01/2024
+  DD Mon YYYY   31 Jan 2024    Mon is one of Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec,
+                               written exactly like that (capital first letter, then lowercase)
+
+A string is a valid date when it has one of these formats, its year is from 1900 to 2099, and the
+day exists in that month and year of the Gregorian calendar: February has 29 days in a leap year and
+28 otherwise, a year is a leap year if it is divisible by 4 except that years divisible by 100 are
+leap years only if they are also divisible by 400 (so 2000 is a leap year, 1900 is not), and April,
+June, September and November have 30 days, the other months 31.
+
+How the pattern is applied: it is compiled with `re.compile(pattern)` (no flags) and tested against
+each string of a hidden labeled set with `re.fullmatch`, so it has to match the whole string. The
+set holds valid dates in all three formats and many look-alike strings that are not valid dates.
+`examples.txt` shows a few labeled strings: each line is `+` (valid) or `-` (not valid), one space,
+and then the string, which runs to the end of the line.
+
+Scoring (maximize): score = 100 * accuracy - 0.02 * len(pattern), where accuracy is the fraction of
+hidden strings classified correctly and len(pattern) counts characters. A pattern that does not
+compile, or that takes too long on the hidden set (for instance through catastrophic backtracking),
+is invalid. The feedback shows which groups of strings are misclassified.
+'''
+seed = "seed"
+editable = ["pattern.txt"]
+
+[judge]
+run = "python3 \"$LETHE_TASK_DIR/judge/score.py\""
+direction = "max"
+timeout = 60
+
+[budget]
+usd = 5.0

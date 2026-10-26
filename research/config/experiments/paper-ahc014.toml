@@ -1,0 +1,33 @@
+# Scaled-down replication of the paper's AtCoder Heuristic Contest 014 experiment (Tan et al.
+# 2026, arXiv 2610.20563) on a Claude subscription: one agent, four parallel agents, and a team
+# of four with forgetting, at the same total budget, three replicates each. Higher scores are
+# better. Needs a Rust toolchain for the official tester (see research/scripts/fetch_ahc014.sh).
+#
+# The paper gave each run $20 on AHC014 ($40 on VLIW) and used DeepSeek V4.1 Flash, a cheap model
+# that fits hundreds of turns into that budget. A subscription's rate windows allow far fewer
+# turns, so each run here is capped at 160 proposals (agent turns across the whole team) instead
+# of a dollar amount: `usd = 0` removes the dollar cap, and `primary = "proposals"` makes the
+# forget fractions (25/50/75%) count proposals. Absolute scores are therefore not comparable
+# with the paper's; the matched-budget comparison between the arms is what this reproduces.
+#
+#   python -m research.matrix research/config/experiments/paper-ahc014.toml
+#   python -m research.analyze research/runs/paper-ahc014 --ref solo --compare team-forget:parallel
+
+name = "paper-ahc014"
+task = "../../tasks/ahc014/lethe.toml"
+replicates = 3
+
+[overrides]
+budget = { proposals = 160, primary = "proposals", usd = 0 }
+
+[[arms]]
+name = "solo"
+preset = "solo"
+
+[[arms]]
+name = "parallel"
+preset = "parallel"
+
+[[arms]]
+name = "team-forget"
+preset = "team-forget"

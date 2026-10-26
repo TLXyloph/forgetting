@@ -1,0 +1,19 @@
+[project]
+name = "lethe-research"
+version = "0.1.0"
+description = "Reproduction of 'Scaling Discovery Requires Forgetting' and experiments on forgetting policies."
+requires-python = ">=3.11"
+dependencies = ["lethe"]
+
+[project.optional-dependencies]
+plots = ["matplotlib>=3.8"]
+
+[tool.uv.sources]
+lethe = { workspace = true }
+
+[tool.uv.build-backend]
+module-name = "research"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"

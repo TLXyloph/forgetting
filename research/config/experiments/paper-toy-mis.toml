@@ -1,0 +1,27 @@
+# Cheap development replication of the paper's three configurations (Tan et al. 2026,
+# arXiv 2610.20563) on the toy maximum-independent-set task: one agent, four parallel agents, and
+# a team of four with forgetting (forgets at 25/50/75% of the budget), all at the same total
+# budget, three replicates each. Small enough to iterate on the tooling with Claude Haiku.
+#
+#   python -m research.matrix research/config/experiments/paper-toy-mis.toml
+#   python -m research.analyze research/runs/paper-toy-mis --ref solo --compare team-forget:parallel
+
+name = "paper-toy-mis"
+task = "../../tasks/toy-mis/lethe.toml"
+replicates = 3
+
+[overrides]
+budget = { usd = 3.0 }
+agent = { model = "haiku" }
+
+[[arms]]
+name = "solo"
+preset = "solo"
+
+[[arms]]
+name = "parallel"
+preset = "parallel"
+
+[[arms]]
+name = "team-forget"
+preset = "team-forget"

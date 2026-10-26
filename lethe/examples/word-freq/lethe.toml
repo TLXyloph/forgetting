@@ -1,0 +1,39 @@
+[task]
+name = "word-freq"
+description = '''
+Word frequency, as fast as possible. Edit `wordfreq.py` so that
+`top_words(text: str, k: int) -> list[tuple[str, int]]` returns the k most frequent words of `text`.
+
+Definition. Lowercase the text with `str.lower()`. A word is a maximal run of characters from `a`-`z`
+and the apostrophe `'` in the lowercased text; every other character (digits, punctuation,
+whitespace, hyphens, underscores, any non-ASCII character) separates words. So `Don't` is the single
+word `don't`, a lone `'` is a word, and `state-of-the-art` is four words.
+
+Output. A list of `(word, count)` pairs sorted by count, highest first; words with equal counts are
+ordered by the word in ascending order (Python's default string ordering, in which `'` sorts before
+the letters). The list holds the first `k` pairs, or fewer if the text has fewer distinct words;
+`k = 0` gives an empty list. The result must be exactly what this specification produces, for any
+text.
+
+Rules: Python 3.11+ and the standard library only.
+
+Evaluation, in order:
+1. A correctness gate on hidden generated cases of many kinds of text and values of `k`. Any wrong
+   answer makes the candidate invalid; the feedback names the kinds of case that failed, not their
+   contents.
+2. Timing. `top_words(corpus, 50)` is called on a hidden generated corpus of about 300,000 words, in
+   five separate fresh Python processes; each output is also checked. Only the call is timed.
+
+Objective (minimize): the median wall-clock time of the five calls, in milliseconds.
+'''
+seed = "seed"
+editable = ["wordfreq.py"]
+
+[judge]
+run = "python3 \"$LETHE_TASK_DIR/judge/score.py\""
+direction = "min"
+timeout = 300
+concurrency = 1
+
+[budget]
+usd = 5.0

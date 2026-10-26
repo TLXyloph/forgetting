@@ -1,0 +1,57 @@
+[task]
+name = "ahc014"
+description = '''
+AtCoder Heuristic Contest 014, "RectJoin" (the full statement is at
+https://atcoder.jp/contests/ahc014/tasks/ahc014_a?lang=en). Edit `main.cpp`: a C++17 program that
+plays a solitaire game on a grid and prints its moves.
+
+The game. The board is an N x N grid of lattice points with coordinates 0..N-1 on both axes, (0, 0)
+being the lower-left corner. M of the points hold a dot at the start. One move chooses four lattice
+points p1, p2, p3, p4 such that
+  - p1 is empty and p2, p3, p4 hold dots;
+  - p1, p2, p3, p4, taken in this order (clockwise or counter-clockwise), are the corners of a
+    rectangle whose sides are either parallel to the axes or tilted by exactly 45 degrees, so that
+    each side runs along a grid row, a grid column or a diagonal;
+  - no dot other than p2, p3 and p4 lies on the rectangle's perimeter (every lattice point on its
+    four sides counts);
+  - the perimeter shares no segment of positive length with the perimeter of any rectangle drawn by
+    an earlier move (crossing or touching at single points is allowed).
+The move places a dot on p1 and draws the rectangle's perimeter. p1 must lie inside the grid. A
+point that already received a dot can never be chosen as p1 again, but dots can serve as p2, p3 or
+p4 in any number of moves, and p1 may lie on a perimeter drawn earlier. You decide how many moves
+to make.
+
+Input (standard input): a first line `N M`, then M lines `x y`, the initial dots. N is odd with
+31 <= N <= 61, N <= M <= floor(N^2 / 12), and every initial dot has floor(N/4) <= x, y <= floor(3N/4).
+
+Output (standard output): a first line `K`, the number of moves, then K lines
+`x1 y1 x2 y2 x3 y3 x4 y4`, the move's four points with the new dot p1 first, in rectangle order.
+Any illegal move makes the whole output for that input invalid.
+
+Score of one input = round(10^6 * (N^2 / M) * W / S), where w(x, y) = (x - c)^2 + (y - c)^2 + 1 with
+c = (N - 1) / 2, W is the sum of w over all dots at the end (initial dots included) and S is the sum
+of w over all N^2 grid points. Dots far from the center are worth more.
+
+Rules. The program is built with `c++ -O2 -std=c++17 main.cpp -o main` and uses only the C++17
+standard library (include the standard headers you need: `<bits/stdc++.h>` is not available
+everywhere). It is run once per input with the input on standard input and a wall-clock limit of
+5 seconds; leave a safety margin, because the machine may be busy. A run that exceeds the limit,
+crashes or prints an illegal answer scores 0 on that input.
+
+Evaluation: the 30 inputs 0000-0029 that ship with the contest's official tools; each output is
+scored by the official visualizer.
+
+Objective (maximize): the mean score over the 30 inputs. The feedback lists the weakest inputs.
+'''
+seed = "seed"
+editable = ["main.cpp"]
+
+[judge]
+build = "c++ -O2 -std=c++17 main.cpp -o main"
+run = "python3 \"$LETHE_TASK_DIR/judge/score.py\""
+direction = "max"
+timeout = 300
+concurrency = 1
+
+[budget]
+usd = 5.0

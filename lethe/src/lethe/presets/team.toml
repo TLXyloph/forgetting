@@ -1,0 +1,7 @@
+# Four agents that see each other's candidates, without forgetting.
+[team]
+agents = 4
+peers = "all"
+
+[forget]
+when = []

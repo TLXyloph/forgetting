@@ -1,0 +1,7 @@
+# The paper's method: a team of four that forgets three times (four rounds).
+[team]
+agents = 4
+peers = "all"
+
+[forget]
+when = [{ type = "budget_fractions", fractions = [0.25, 0.5, 0.75] }]

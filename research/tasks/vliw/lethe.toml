@@ -1,0 +1,42 @@
+[task]
+name = "vliw"
+description = '''
+Optimize a kernel for a simulated VLIW SIMD processor: Anthropic's original performance take-home.
+The repository is cloned by `research/scripts/fetch_vliw.sh`.
+
+The program to write. `perf_takehome.py` contains a `KernelBuilder` class. Its method
+`build_kernel(forest_height, n_nodes, batch_size, rounds)` appends instruction bundles to
+`self.instrs`; the resulting program is run on the simulated machine defined in `problem.py` (its
+engines, how many slots of each engine one bundle may use, scratch space, memory, and instruction
+set; read the `Machine` class and the comments in that file). The program has to do what the
+reference kernel `reference_kernel2` in `problem.py` does: for every one of `batch_size` inputs and
+for `rounds` rounds, combine the input's value with the value stored at its current node of an
+implicit perfect binary tree, hash the result, move to the left or right child according to the
+hash, wrap back to the root after the leaves, and store the new values and indices back to memory.
+The starter kernel is a correct but completely sequential implementation that uses one slot per
+bundle. It takes 147,734 cycles.
+
+Evaluation. `build_kernel(10, 2047, 256, 16)` is called once (tree height 10, 2,047 nodes, 256
+inputs, 16 rounds) and the program is run on a frozen copy of the simulator, `tests/frozen_problem.py`,
+as `tests/submission_tests.py` does. The final `inp_values` array in memory must equal the
+reference's for random trees and inputs: the judge checks 8 random cases before it measures cycles.
+An exception, a wrong answer or a program that never halts makes the candidate invalid.
+
+Rules. Only `perf_takehome.py` is judged. Changes to any other file (`problem.py`, `tests/`, the
+number of cores, the simulator) are discarded and cannot change the score; the multicore setting
+is switched off on purpose in this version. Python 3.11+ and the standard library only, and
+`build_kernel` must finish within 5 minutes.
+
+Objective (minimize): the number of machine cycles the program needs. The feedback reports the
+cycle count and the speedup over the 147,734-cycle baseline, or the error.
+'''
+seed = "vendor/original_performance_takehome"
+editable = ["perf_takehome.py"]
+
+[judge]
+run = "python3 \"$LETHE_TASK_DIR/judge/score.py\""
+direction = "min"
+timeout = 900
+
+[budget]
+usd = 5.0

@@ -1,0 +1,35 @@
+[task]
+name = "toy-mis"
+description = '''
+Maximum independent set. Edit `solver.py`: a Python program that reads one undirected graph from
+standard input and prints a large independent set (a set of vertices, no two of which are joined by
+an edge).
+
+Input: a first line `n m`, then m lines `u v` with 0 <= u, v < n and u != v, one per undirected
+edge (no repeated edges).
+
+Output: one line with the chosen vertex ids, separated by single spaces. The ids must be distinct
+integers in [0, n) and no two of them may be adjacent. A crash, a non-zero exit status or any other
+output makes the candidate invalid.
+
+Rules: the program is started as `python3 solver.py` with the graph on standard input, once per
+graph, in a fresh process; Python 3.11+ and the standard library only. Each run has a wall-clock
+limit of 2 seconds, interpreter start-up included; a run that exceeds it scores 0 on that graph.
+
+Benchmark: the same 12 hidden graphs, with between 200 and 800 vertices, are used for every
+candidate.
+
+Objective (maximize): score = the mean over the 12 graphs of 100 * |S| / |S_ref|, where |S| is the
+size of your set and S_ref is the set produced by a reference procedure fixed inside the judge (a
+score of 100 matches it). The feedback lists the result for each graph.
+'''
+seed = "seed"
+editable = ["solver.py"]
+
+[judge]
+run = "python3 \"$LETHE_TASK_DIR/judge/score.py\""
+direction = "max"
+timeout = 120
+
+[budget]
+usd = 3.0
