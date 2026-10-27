@@ -20,6 +20,18 @@ PAPER_FILES = {
     "paper-toy-mis": ("toy-mis", {"budget": {"usd": 3.0}, "agent": {"model": "haiku"}}),
     "paper-vliw": ("vliw", {"budget": {"proposals": 160, "primary": "proposals", "usd": 200}}),
     "paper-ahc014": ("ahc014", {"budget": {"proposals": 160, "primary": "proposals", "usd": 200}}),
+    "replicate-vliw-sonnet": (
+        "vliw",
+        {
+            "agent": {"model": "claude-sonnet-5-5"},
+            "budget": {
+                "usd": 40,
+                "proposals": 0,
+                "primary": "usd",
+                "pause_at_weekly_utilization": 0.8,
+            },
+        },
+    ),
 }
 
 # arm -> (preset, arm-level overrides), in file order
@@ -70,7 +82,7 @@ def load(name: str) -> Experiment:
 # ---------------------------------------------------------------------------------------------
 
 
-def test_all_four_experiment_files_exist() -> None:
+def test_all_shipped_experiment_files_exist() -> None:
     assert set(ALL_FILES) <= {p.stem for p in EXPERIMENTS.glob("*.toml")}
 
 
@@ -164,6 +176,16 @@ def test_proposal_budget_reaches_the_config(name: str) -> None:
         assert config.budget.proposals == 160
         assert config.budget.usd == 200  # a safety cap, never the unit forgets are scheduled in
         assert config.budget.primary == "proposals"
+
+
+def test_vliw_replication_matches_the_paper_in_dollars_with_a_pinned_sonnet() -> None:
+    for arm, _ in PAPER_ARMS:
+        config = resolved(load("replicate-vliw-sonnet"), arm)
+        assert config.budget.usd == 40  # the paper's VLIW budget per run
+        assert config.budget.proposals == 0  # no proposal cap: dollars are the only budget
+        assert config.budget.primary == "usd"
+        assert config.agent.model == "claude-sonnet-5-5"  # a full id, not the moving alias
+        assert config.budget.pause_at_weekly_utilization == 0.8  # a fifth of the week stays free
 
 
 @pytest.mark.parametrize("arm", list(BETS))

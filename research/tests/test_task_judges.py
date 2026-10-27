@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -81,13 +83,24 @@ def test_vliw_and_ahc014_configs_match_the_spec() -> None:
 
 
 def test_vendor_directories_are_git_ignored_and_nothing_is_copied_out_of_them() -> None:
-    ignored = (RESEARCH.parent / ".gitignore").read_text(encoding="utf-8").splitlines()
+    repo = RESEARCH.parent
+    ignored = (repo / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "research/tasks/*/vendor/" in ignored
+    assert "research/runs/" in ignored  # run workspaces hold candidate copies of the take-home
+    if shutil.which("git") is None or not (repo / ".git").exists():
+        pytest.skip("not a git checkout")
+    # every file git would commit: tracked, or untracked and not ignored
+    listed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
     banned = {"perf_takehome.py", "frozen_problem.py", "submission_tests.py"}
-    for root in (RESEARCH, RESEARCH.parent / "lethe"):
-        for path in root.rglob("*"):
-            if path.name in banned and "vendor" not in path.relative_to(root).parts:
-                pytest.fail(f"{path}: the take-home must never be copied outside vendor/")
+    for name in listed:
+        if Path(name).name in banned:
+            pytest.fail(f"{name}: the take-home must never be committed outside vendor/")
 
 
 # --- toy-mis ---

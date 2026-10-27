@@ -1,0 +1,38 @@
+# E1: head-to-head replication of the paper's VLIW experiment (Tan et al. 2026, arXiv 2610.20563,
+# Table 1) with Claude Sonnet in Claude Code: one agent, four parallel agents, and a team of four
+# that forgets at 25/50/75% of the budget, three replicates each. Lower cycle counts are better.
+#
+# Unlike paper-vliw.toml (a proposal-capped scale-down), budgets here are matched in USD as the
+# paper did: $40 per VLIW run, metered in API-equivalent dollars (Claude Code's list-price cost,
+# which it reports even on a subscription). `proposals = 0` lifts the task's proposal cap so the
+# dollar budget is the only one, and the forget fractions count dollars. The model is pinned to a
+# full id rather than the `sonnet` alias so a model release cannot change it mid-matrix. The
+# matrix takes days, so every run pauses once the subscription's 7-day window is 80% used and
+# resumes when it resets, leaving a fifth of the week for other work; pausing changes only
+# wall-clock time. Design, hypotheses and the analysis plan: docs/replication-plan.md (findings
+# branch).
+#
+#   DISABLE_AUTOUPDATER=1 uv run python -m research.matrix \
+#       research/config/experiments/replicate-vliw-sonnet.toml
+#   uv run python -m research.analyze research/runs/replicate-vliw-sonnet --ref solo \
+#       --compare team-forget:parallel --plots --out docs/findings/e1
+
+name = "replicate-vliw-sonnet"
+task = "../../tasks/vliw/lethe.toml"
+replicates = 3
+
+[overrides]
+agent = { model = "claude-sonnet-5-5" }
+budget = { usd = 40, proposals = 0, primary = "usd", pause_at_weekly_utilization = 0.8 }
+
+[[arms]]
+name = "solo"
+preset = "solo"
+
+[[arms]]
+name = "parallel"
+preset = "parallel"
+
+[[arms]]
+name = "team-forget"
+preset = "team-forget"
