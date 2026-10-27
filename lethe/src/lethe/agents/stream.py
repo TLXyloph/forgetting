@@ -214,13 +214,14 @@ def _parse_rate_limit(info: Any) -> RateLimitInfo | None:
     windows = info.get("unifiedWindows")
     if not isinstance(windows, dict):
         windows = {}
-    five_hour = windows.get("five_hour")
+    five_hour, seven_day = windows.get("five_hour"), windows.get("seven_day")
     return RateLimitInfo(
         status=status if isinstance(status, str) else "",
         five_hour_utilization=_window_number(five_hour, "utilization"),
-        seven_day_utilization=_window_number(windows.get("seven_day"), "utilization"),
+        seven_day_utilization=_window_number(seven_day, "utilization"),
         resets_at=_as_float(info.get("resetsAt")),
         five_hour_resets_at=_window_number(five_hour, "resetsAt"),
+        seven_day_resets_at=_window_number(seven_day, "resetsAt"),
     )
 
 

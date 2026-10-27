@@ -151,6 +151,12 @@ def test_rate_limited_turns_pause_and_are_not_proposals(tmp_path):
     assert state.proposals == 3 and all(t.status != "error" for t in store.of(TurnFinished))
 
 
+def test_the_default_pacer_takes_both_window_thresholds_from_the_budget(tmp_path):
+    budget = {"usd": 1.0, "pause_at_utilization": 0.9, "pause_at_weekly_utilization": 0.8}
+    orch, _, _, _, _ = build(tmp_path, lambda *a: Reply(value="1"), budget=budget)
+    assert (orch.pacer.pause_at, orch.pacer.weekly_pause_at) == (0.9, 0.8)
+
+
 def test_repeated_errors_stop_the_agent(tmp_path):
     orch, store, _, _, _ = build(tmp_path, lambda *a: Reply(error_kind="api"), **SOLO)
     state = asyncio.run(orch.run())

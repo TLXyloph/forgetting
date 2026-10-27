@@ -90,7 +90,10 @@ class Orchestrator:
         self.run_id, self.run_dir = run_id, Path(run_dir)
         self.archive, self.materializer, self.judge = archive, materializer, judge
         self.backend, self.store = backend, store
-        self.pacer = pacer or Pacer(pause_at=config.budget.pause_at_utilization)
+        self.pacer = pacer or Pacer(
+            pause_at=config.budget.pause_at_utilization,
+            weekly_pause_at=config.budget.pause_at_weekly_utilization,
+        )
         self._monotonic = monotonic
         self._new_session_id = new_session_id or (lambda: str(uuid.uuid4()))
         self._on_event = on_event

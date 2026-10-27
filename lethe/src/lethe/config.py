@@ -67,6 +67,7 @@ DEFAULTS: dict[str, Any] = {
         "wall": 0,
         "primary": "usd",
         "pause_at_utilization": 0.95,
+        "pause_at_weekly_utilization": 1.0,
     },
     "run": {"runs_dir": ".lethe/runs"},
 }
@@ -338,12 +339,12 @@ def _budget(b: dict[str, Any]) -> BudgetSpec:
         raise ConfigError("budget.primary must be 'usd', 'proposals' or 'wall'")
     if caps[primary] <= 0:
         raise ConfigError(f"budget.primary is {primary!r} but budget.{primary} is 0")
-    pause = _num(b, "pause_at_utilization", "budget", minimum=0, strict=True)
-    if pause > 1:
-        raise ConfigError("budget.pause_at_utilization must be in (0, 1]")
-    return BudgetSpec(
-        usd=usd, proposals=proposals, wall_s=wall, primary=primary, pause_at_utilization=pause
-    )
+    pauses = {}
+    for key in ("pause_at_utilization", "pause_at_weekly_utilization"):
+        pauses[key] = _num(b, key, "budget", minimum=0, strict=True)
+        if pauses[key] > 1:
+            raise ConfigError(f"budget.{key} must be in (0, 1]")
+    return BudgetSpec(usd=usd, proposals=proposals, wall_s=wall, primary=primary, **pauses)
 
 
 def _str(d: Mapping[str, Any], key: str, section: str, *, allow_empty: bool = False) -> str:

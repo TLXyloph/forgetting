@@ -106,6 +106,7 @@ def test_rate_limit_fields() -> None:
         seven_day_utilization=1.0,
         resets_at=1793050200.0,
         five_hour_resets_at=1793050200.0,
+        seven_day_resets_at=1793631600.0,
     )
 
 

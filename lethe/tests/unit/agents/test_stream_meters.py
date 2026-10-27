@@ -56,6 +56,19 @@ def test_the_five_hour_reset_is_read_from_its_own_window():
     assert parse_stream([bare]).rate_limit.five_hour_resets_at is None
 
 
+def test_the_seven_day_reset_is_read_from_its_own_window():
+    windows = {"five_hour": {"resetsAt": 5000}, "seven_day": {"utilization": 0.4, "resetsAt": 9e5}}
+    event = line(
+        type="rate_limit_event",
+        rate_limit_info={"status": "allowed", "resetsAt": 5000, "unifiedWindows": windows},
+    )
+    info = parse_stream([event]).rate_limit
+    assert info is not None
+    assert (info.seven_day_utilization, info.seven_day_resets_at) == (0.4, 900000.0)
+    bare = line(type="rate_limit_event", rate_limit_info={"status": "allowed", "resetsAt": 1})
+    assert parse_stream([bare]).rate_limit.seven_day_resets_at is None
+
+
 def test_the_cumulative_total_is_reported_and_the_fallback_is_flagged():
     per_turn = {"model_usage_since_last_result": {"m": {"costUSD": 0.25}}}
     with_usage = parse_stream([line(type="result", total_cost_usd=9.0, **per_turn)])

@@ -127,7 +127,7 @@ Unknown keys are errors.
 | `forget` | `when` ([] = never), `seed` (`best`/`hedged`), `carry_scratch` (true) | triggers, what each agent restarts from, whether notes left in the best candidate survive |
 | `agent` | `model` (`sonnet`), `effort`, `isolation` (`safe`), `shell` (false), `turn_timeout` (1800), `allow_api_billing` (false), `extra_args` | the Claude Code agent |
 | `judge` | `run`, `direction`, `timeout` (600), `build`, `concurrency` (2), `cache` (true), `output` (`stdout`), `env` | scoring |
-| `budget` | `usd` (5.0), `proposals` (0), `wall` (0), `primary` (`usd`), `pause_at_utilization` (0.95) | caps: the first one reached stops the run |
+| `budget` | `usd` (5.0), `proposals` (0), `wall` (0), `primary` (`usd`), `pause_at_utilization` (0.95), `pause_at_weekly_utilization` (1.0) | caps: the first one reached stops the run; pause thresholds for the 5-hour and 7-day windows |
 
 **Presets** (`lethe presets`): `solo` (1 agent), `parallel` (4 independent agents), `team` (4 agents
 that see each other's candidates), and `team-forget` (the paper: a team of 4 forgetting at 25/50/75%
@@ -150,6 +150,9 @@ of the budget; the default).
 - `primary` picks the unit that forget schedules use.
 - Every turn also logs the subscription's **5-hour and 7-day window utilization**. All agents pause
   at `pause_at_utilization` of the 5-hour window and resume after it resets.
+- `pause_at_weekly_utilization` does the same for the 7-day window. Set it below 1 (say 0.8) on long
+  runs to keep part of the week's allowance for other work. Pausing never changes results, only
+  wall-clock time.
 - `lethe report` shows spend, proposals and the latest window reading.
 
 ## Isolation and trust model

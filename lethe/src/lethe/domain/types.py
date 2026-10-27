@@ -59,8 +59,8 @@ class RateLimitInfo:
     """Subscription meter reported by Claude Code (`rate_limit_event`).
 
     Utilizations are fractions in [0, 1] of the 5-hour and 7-day windows; `resets_at` is an
-    epoch timestamp (seconds) for the window named by the event, and `five_hour_resets_at` the
-    reset of the 5-hour window itself (None when the event does not report it).
+    epoch timestamp (seconds) for the window named by the event, and `five_hour_resets_at` and
+    `seven_day_resets_at` the resets of those windows themselves (None when not reported).
     """
 
     status: str
@@ -68,6 +68,7 @@ class RateLimitInfo:
     seven_day_utilization: float | None = None
     resets_at: float | None = None
     five_hour_resets_at: float | None = None
+    seven_day_resets_at: float | None = None
 
 
 @dataclass(frozen=True)

@@ -41,6 +41,8 @@ def test_minimal_config_gets_paper_defaults(tmp_path):
     assert ".git/**" in cfg.task.exclude
     assert cfg.judge.run == "python3 judge.py" and cfg.judge.timeout_s == 600
     assert cfg.budget.usd == 5.0 and cfg.budget.primary == "usd"
+    assert cfg.budget.pause_at_utilization == 0.95
+    assert cfg.budget.pause_at_weekly_utilization == 1.0  # off: pause only on a full week
     assert cfg.agent.isolation == "safe" and cfg.agent.model == "sonnet"
     assert cfg.runs_dir == (tmp_path / ".lethe" / "runs").resolve()
     assert cfg.resolved["team"]["agents"] == 4
@@ -95,6 +97,9 @@ def test_invalid_overrides_are_rejected(tmp_path):
         load_config(path, overrides={"budget": {"usd": 0}})
     with pytest.raises(ConfigError, match="primary"):
         load_config(path, overrides={"budget": {"primary": "proposals"}})
+    for bad in (0, 1.5):
+        with pytest.raises(ConfigError, match="pause_at_weekly_utilization"):
+            load_config(path, overrides={"budget": {"pause_at_weekly_utilization": bad}})
     with pytest.raises(ConfigError, match="trigger"):
         load_config(path, overrides={"forget": {"when": [{"type": "nope"}]}})
     with pytest.raises(ConfigError, match="effort"):
@@ -108,6 +113,13 @@ def test_invalid_overrides_are_rejected(tmp_path):
 def test_missing_required_sections(tmp_path):
     with pytest.raises(ConfigError, match="judge.run"):
         load_config(write_task(tmp_path, MINIMAL.replace('run = "python3 judge.py"\n', "")))
+
+
+def test_the_weekly_pause_threshold_reaches_the_budget(tmp_path):
+    cfg = load_config(
+        write_task(tmp_path, MINIMAL), overrides={"budget": {"pause_at_weekly_utilization": 0.8}}
+    )
+    assert cfg.budget.pause_at_weekly_utilization == 0.8
 
 
 def test_list_presets():

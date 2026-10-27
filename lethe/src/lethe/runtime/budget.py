@@ -3,7 +3,8 @@
 Spend is metered in API-equivalent USD (Claude Code reports each turn's cost at list price even
 on a subscription), in proposals (agent turns), and in wall-clock seconds. On a subscription the
 binding constraint is usually the 5-hour usage window, so the `Pacer` pauses every agent when the
-window is nearly full or exhausted and resumes after it resets.
+window is nearly full or exhausted and resumes after it resets. An optional weekly threshold does
+the same for the 7-day window, to leave part of a week's allowance for other use during long runs.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ class BudgetSpec:
     wall_s: float = 0.0
     primary: Primary = "usd"
     pause_at_utilization: float = 0.95
+    pause_at_weekly_utilization: float = 1.0
 
 
 def spend_fraction(
@@ -64,12 +66,14 @@ class Pacer:
         self,
         *,
         pause_at: float,
+        weekly_pause_at: float = 1.0,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         base_backoff_s: float = 60.0,
         max_backoff_s: float = 900.0,
     ) -> None:
         self.pause_at = pause_at
+        self.weekly_pause_at = weekly_pause_at
         self._clock = clock
         self._sleep = sleep
         self._base = base_backoff_s
@@ -78,16 +82,21 @@ class Pacer:
         self.paused_until = 0.0
 
     def observe(self, info: RateLimitInfo | None) -> float | None:
-        """Record a healthy turn's meter; pause if the 5-hour window crossed `pause_at`, until
-        that window resets (`five_hour_resets_at`; the event's `resets_at` when absent)."""
+        """Record a healthy turn's meter; pause if the 5-hour window crossed `pause_at` or the
+        7-day window crossed `weekly_pause_at`, until that window resets (its own reset time; the
+        event's `resets_at` when absent). When both crossed, the later reset wins."""
         if info is None:
             return None
         self._backoff = self._base
-        util = info.five_hour_utilization
-        if util is not None and util >= self.pause_at:
-            resets = info.five_hour_resets_at
-            return self._pause_until(info.resets_at if resets is None else resets)
-        return None
+        until = None
+        windows = (
+            (info.five_hour_utilization, self.pause_at, info.five_hour_resets_at),
+            (info.seven_day_utilization, self.weekly_pause_at, info.seven_day_resets_at),
+        )
+        for util, threshold, resets in windows:
+            if util is not None and util >= threshold:
+                until = self._pause_until(info.resets_at if resets is None else resets)
+        return until
 
     def note_rate_limited(self, info: RateLimitInfo | None) -> float:
         """A turn was refused for rate limits: pause until the window resets (or back off)."""

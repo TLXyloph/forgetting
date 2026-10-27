@@ -59,6 +59,7 @@ def test_new_session_turn() -> None:
         seven_day_utilization=0.07,
         resets_at=1793050200.0,
         five_hour_resets_at=1793050200.0,
+        seven_day_resets_at=1793631600.0,
     )
     assert s.num_api_turns == 3
     assert s.malformed_lines == 0
@@ -120,6 +121,7 @@ def test_usage_limit_error_turn() -> None:
         seven_day_utilization=0.62,
         resets_at=1793050200.0,
         five_hour_resets_at=1793050200.0,
+        seven_day_resets_at=1793631600.0,
     )
     # model_usage_since_last_result is present (and empty): nothing was spent this turn, even
     # though the cumulative total_cost_usd in the same line is 0.0123

@@ -88,3 +88,37 @@ def test_without_a_five_hour_reset_the_events_reset_is_the_fallback():
     assert (
         pacer.observe(RateLimitInfo("allowed_warning", 0.97, 0.5, 3000.0)) == 3000.0 + Pacer.GRACE_S
     )
+
+
+def test_the_weekly_threshold_is_off_by_default():
+    t = FakeTime()
+    pacer = Pacer(pause_at=0.95, clock=t.clock, sleep=t.sleep)
+    info = RateLimitInfo("allowed", 0.1, 0.99, resets_at=2000.0, seven_day_resets_at=9000.0)
+    assert pacer.observe(info) is None
+
+
+def test_a_weekly_window_past_its_threshold_pauses_until_that_window_resets():
+    t = FakeTime()
+    pacer = Pacer(pause_at=0.95, weekly_pause_at=0.8, clock=t.clock, sleep=t.sleep)
+    below = RateLimitInfo("allowed", 0.1, 0.79, resets_at=2000.0, seven_day_resets_at=9000.0)
+    assert pacer.observe(below) is None
+    # the event's own resetsAt names the 5-hour window here: not the one to wait for
+    crossed = RateLimitInfo("allowed", 0.1, 0.8, resets_at=2000.0, seven_day_resets_at=9000.0)
+    assert pacer.observe(crossed) == 9000.0 + Pacer.GRACE_S
+    asyncio.run(pacer.wait())
+    assert t.now >= 9000.0 + Pacer.GRACE_S
+
+
+def test_both_windows_full_waits_for_the_later_reset():
+    t = FakeTime()
+    pacer = Pacer(pause_at=0.95, weekly_pause_at=0.8, clock=t.clock, sleep=t.sleep)
+    info = RateLimitInfo(
+        "allowed_warning", 0.97, 0.9, 2000.0, five_hour_resets_at=4000.0, seven_day_resets_at=9000.0
+    )
+    assert pacer.observe(info) == 9000.0 + Pacer.GRACE_S
+
+
+def test_without_a_weekly_reset_the_events_reset_is_the_fallback():
+    t = FakeTime()
+    pacer = Pacer(pause_at=0.95, weekly_pause_at=0.8, clock=t.clock, sleep=t.sleep)
+    assert pacer.observe(RateLimitInfo("allowed", 0.1, 0.85, 3000.0)) == 3000.0 + Pacer.GRACE_S
