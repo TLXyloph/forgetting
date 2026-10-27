@@ -138,6 +138,19 @@ def test_report_without_forgetting_arms_says_so(tmp_path: Path, run_builder: typ
     assert "no arm has team forgets" in text.lower()
 
 
+def test_the_report_flags_a_run_with_an_unplanned_forget(tmp_path: Path, run_builder: type) -> None:
+    b = run_builder(tmp_path / "e" / "solo" / "rep1", agents=("a1",)).start(100.0)
+    b.candidate("a1", 110.0)
+    b.error("a1")
+    b.new_session("a1")
+    b.candidate("a1", 120.0)
+    b.finish()
+    text = render_report(build_report(load_summaries(tmp_path / "e"), experiment="e"))
+    listing = text[text.index("Runs") :]
+    row = next(line for line in listing.splitlines() if line.startswith("solo/rep1"))
+    assert "unplanned" in listing and row.split()[-2] == "1"  # the count, before "ended"
+
+
 def test_report_includes_a_per_run_listing(experiment: Path) -> None:
     text = report_text(experiment)
     assert "solo/rep1" in text

@@ -363,3 +363,60 @@ def test_agent_scope_resets_are_counted_but_do_not_start_a_round(
     assert s.team_forgets == 0
     assert s.agent_resets == 2
     assert s.rounds == (RoundScores(100.0, 125.0),)
+
+
+# ---------------------------------------------------------------------------------------------
+# unplanned forgets
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_session_restarted_without_a_forget_is_an_unplanned_forget(
+    tmp_path: Path, run_builder: type
+) -> None:
+    b = run_builder(tmp_path / "r", agents=("a1", "a2")).start(100.0)
+    b.candidate("a1", 110.0, cost=0.5)
+    b.candidate("a2", 105.0, cost=0.5)
+    b.error("a1")  # a failure the harness does not resume: a1 starts over
+    b.new_session("a1")
+    b.error("a1")  # still the same restart, however many turns it takes to recover
+    b.candidate("a1", 120.0, cost=0.5)
+    b.empty("a1", cost=0.5)
+    s = summarize_run(b.finish(), arm="solo", rep=1)
+
+    assert s.unplanned_forgets == 1
+
+
+def test_planned_forgets_resumed_errors_and_sessions_that_never_ran_are_not_unplanned(
+    tmp_path: Path, run_builder: type
+) -> None:
+    b = run_builder(tmp_path / "r", agents=("a1", "a2")).start(100.0)
+    b.new_session("a2")
+    b.error("a2")  # a2's first session failed before any turn: it held nothing to forget
+    b.new_session("a2")
+    b.candidate("a2", 105.0, cost=0.5)
+    b.candidate("a1", 110.0, cost=0.5)
+    b.error("a1")  # resumed: the next turn continues the same session
+    b.candidate("a1", 115.0, cost=0.5)
+    b.forget()
+    b.candidate("a1", 120.0, cost=0.5)
+    b.reset_agent("a2")
+    b.candidate("a2", 125.0, cost=0.5)
+    s = summarize_run(b.finish(), arm="tf", rep=1)
+
+    assert s.unplanned_forgets == 0
+
+
+def test_an_arm_whose_sessions_never_continue_has_no_unplanned_forgets(
+    tmp_path: Path, run_builder: type
+) -> None:
+    config = {
+        "team": {"session": "fresh"},
+        "budget": {"usd": 3.0, "proposals": 0, "primary": "usd"},
+    }
+    b = run_builder(tmp_path / "r", agents=("a1",), config=config).start(100.0)
+    b.candidate("a1", 110.0, cost=0.5)
+    b.new_session("a1")
+    b.candidate("a1", 120.0, cost=0.5)
+    s = summarize_run(b.finish(), arm="fresh-every-turn", rep=1)
+
+    assert s.unplanned_forgets == 0

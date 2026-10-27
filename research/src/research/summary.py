@@ -100,6 +100,9 @@ class RunSummary:
     curve: tuple[tuple[float, float], ...]
     turns: tuple[TurnRecord, ...]
     budget_usd: float | None  # the run's USD cap, None when it was capped in another unit
+    # sessions an agent lost without a forget (e.g. a failed turn the harness did not resume): a
+    # treatment the arm was not assigned, so the run is not a clean replicate
+    unplanned_forgets: int = 0
 
 
 def _usd_budget(config: object) -> float | None:
@@ -108,6 +111,12 @@ def _usd_budget(config: object) -> float | None:
     if isinstance(usd, bool) or not isinstance(usd, int | float):
         return None
     return float(usd) if usd > 0 else None
+
+
+def _fresh_sessions(config: object) -> bool:
+    """team.session = "fresh": every turn starts a new session by design."""
+    team = config.get("team") if isinstance(config, Mapping) else None
+    return isinstance(team, Mapping) and team.get("session") == "fresh"
 
 
 def _valid_score(event: JudgeFinished) -> float | None:
@@ -132,6 +141,9 @@ class _Fold:
         self.proposals = 0
         self.team_forgets = 0
         self.agent_resets = 0
+        self.fresh_sessions = False
+        self.held: dict[str, str | None] = {}  # agent -> session of its last completed turn
+        self.unplanned_forgets = 0
         self.finish_reason: str | None = None
         self.finish_status = "completed"
         self.turn_spend: dict[str, float] = {}  # candidate -> spend at the end of its turn
@@ -146,6 +158,7 @@ class _Fold:
             self.started = True
             self.direction = event.direction
             self.budget_usd = _usd_budget(event.config)
+            self.fresh_sessions = _fresh_sessions(event.config)
             self.started_at = envelope.ts
         elif not self.started:
             raise ValueError("event log does not begin with a run_started event")
@@ -176,6 +189,12 @@ class _Fold:
 
     def _turn(self, event: TurnFinished) -> None:
         self.spend += event.cost_usd
+        held = self.held.get(event.agent)
+        if held is not None and event.session_id != held and not self.fresh_sessions:
+            self.unplanned_forgets += 1  # counted once: until a turn completes, nothing is held
+            self.held[event.agent] = None
+        if event.status != "error":
+            self.held[event.agent] = event.session_id
         if event.cand_id is not None:
             self.turn_spend[event.cand_id] = self.spend
         if event.status in PROPOSAL_STATUSES:
@@ -192,6 +211,8 @@ class _Fold:
         )
 
     def _epoch(self, event: EpochStarted) -> None:
+        for agent in event.epochs:  # a planned forget: the next session is a new one by design
+            self.held[agent] = None
         if event.scope == "team":
             self.team_forgets += 1
             self.round_bests.append(self.best)
@@ -235,6 +256,7 @@ class _Fold:
             curve=tuple(curve),
             turns=tuple(self.turns),
             budget_usd=self.budget_usd,
+            unplanned_forgets=self.unplanned_forgets,
         )
 
 

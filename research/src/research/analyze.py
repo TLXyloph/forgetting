@@ -195,12 +195,22 @@ def _render_runs(report: Report) -> str:
             str(s.proposals),
             str(s.team_forgets),
             str(s.agent_resets),
+            str(s.unplanned_forgets),
             "complete" if s.finished else (s.finish_reason or "no run_finished"),
         ]
         for s in report.summaries
     ]
-    headers = ["run", "final best", "seed", "spend $", "proposals", "forgets", "resets", "ended"]
-    return "Runs\n" + format_table(headers, rows, align="lrrrrrrl")
+    headers = [
+        "run", "final best", "seed", "spend $", "proposals", "forgets", "resets", "unplanned",
+        "ended",
+    ]  # fmt: skip
+    text = "Runs\n" + format_table(headers, rows, align="lrrrrrrrl")
+    if any(s.unplanned_forgets for s in report.summaries):
+        text += (
+            "\nunplanned: sessions an agent lost without a forget (e.g. after a failed turn);"
+            " such a run is not a clean replicate"
+        )
+    return text
 
 
 def render_report(report: Report) -> str:
@@ -239,6 +249,7 @@ _RUN_COLUMNS = (
     "proposals",
     "team_forgets",
     "agent_resets",
+    "unplanned_forgets",
 )
 
 

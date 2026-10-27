@@ -87,6 +87,7 @@ def test_runs_csv_has_one_row_per_run(experiment: Path, tmp_path: Path) -> None:
     assert float(first["spend_usd"]) == pytest.approx(1.5)
     assert first["proposals"] == "4"
     assert first["team_forgets"] == "0"
+    assert first["unplanned_forgets"] == "0"
 
 
 def test_traces_csv_contents(experiment: Path, tmp_path: Path) -> None:

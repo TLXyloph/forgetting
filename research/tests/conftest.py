@@ -54,6 +54,7 @@ class RunBuilder:
         self._candidates = 0
         self._epochs = {agent: 1 for agent in self.agents}
         self._turns = {agent: 0 for agent in self.agents}
+        self._restarts = {agent: 0 for agent in self.agents}  # sessions begun within an epoch
         self._unjudged: dict[str, float] = {}  # candidates committed with judge=False
         if config is None:
             config = {"budget": {"usd": budget_usd or 0, "proposals": 0, "primary": "usd"}}
@@ -71,6 +72,10 @@ class RunBuilder:
         self._candidates += 1
         return cand_id
 
+    def _session(self, agent: str) -> str:
+        restarts = self._restarts[agent]
+        return f"{agent}-e{self._epochs[agent]}" + (f"-s{restarts}" if restarts else "")
+
     def best(self) -> tuple[str | None, float | None]:
         """Best valid candidate so far under the run's direction."""
         if not self.scores:
@@ -87,7 +92,7 @@ class RunBuilder:
                 parent_id=parent,
                 agent=agent,
                 epoch=self._epochs.get(agent, 0),
-                session_id=None if agent == "seed" else f"{agent}-e{self._epochs[agent]}",
+                session_id=None if agent == "seed" else self._session(agent),
                 judged_key=f"key-{cand_id}",
                 lines_added=lines,
                 lines_deleted=0,
@@ -130,7 +135,7 @@ class RunBuilder:
             TurnFinished(
                 agent=agent,
                 epoch=self._epochs[agent],
-                session_id=f"{agent}-e{self._epochs[agent]}",
+                session_id=self._session(agent),
                 turn_in_session=self._turns[agent],
                 status=status,  # type: ignore[arg-type]
                 cand_id=cand_id,
@@ -243,6 +248,12 @@ class RunBuilder:
     def error(self, agent: str, *, cost: float = 0.0) -> None:
         """A turn that failed (timeout, rate limit...): not a proposal."""
         self._turn(agent, "error", None, cost=cost, lines=0, out=0, think=0, plateau=False)
+
+    def new_session(self, agent: str) -> None:
+        """The agent's next turn runs in a new session without any forget (the harness gave up
+        on its session, e.g. after a process failure)."""
+        self._restarts[agent] += 1
+        self._turns[agent] = 0
 
     def forget(
         self, *, seeds: Mapping[str, str] | None = None, reason: str = "budget_fractions"
