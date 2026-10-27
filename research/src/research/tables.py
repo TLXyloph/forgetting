@@ -264,7 +264,10 @@ class Comparison:
     """Arm A against arm B on the final best score. `diff` is mean(A) - mean(B).
 
     t, df, p (Welch) and the bootstrap interval of `diff` need two valid runs in each arm
-    and are None otherwise.
+    and are None otherwise. The one-sided p-values test "A is better than B" in the run's
+    direction: `p_one_sided` from Welch's t, `mw_p` from the exact Mann-Whitney distribution
+    of `wins` (the (A, B) run pairs where A's final best is the better one, ties counting 1/2).
+    `wins` needs a valid run in each arm, `mw_p` also at most 20 of them in all.
     """
 
     arm_a: str
@@ -278,9 +281,22 @@ class Comparison:
     t: float | None
     df: float | None
     p: float | None
+    p_one_sided: float | None
     ci_low: float | None
     ci_high: float | None
     confidence: float
+    wins: float | None
+    mw_p: float | None
+
+
+def _one_sided_p(t: float, df: float, direction: Direction) -> float:
+    """Welch p-value of "A is better than B" from the t of mean(A) - mean(B)."""
+    t_better = t if direction == "max" else -t  # large when A is the better arm
+    if math.isnan(df):  # both samples constant: t is 0 (same constant) or +/-inf
+        if t_better == 0:
+            return 0.5
+        return 0.0 if t_better > 0 else 1.0
+    return stats.student_t_cdf(-t_better, df)  # P(T >= t_better), accurate in the far tail
 
 
 def compare_arms(
@@ -292,7 +308,8 @@ def compare_arms(
     confidence: float = 0.95,
     seed: int = 0,
 ) -> Comparison:
-    """Welch's t-test and a percentile bootstrap CI between two arms' final best scores."""
+    """Welch's t-test, a percentile bootstrap CI and an exact Mann-Whitney test between two
+    arms' final best scores."""
     finals = _finals_by_arm(summaries)
     for arm in (arm_a, arm_b):
         if arm not in finals:
@@ -305,13 +322,21 @@ def compare_arms(
     if mean_a is not None and mean_b is not None:
         diff = mean_a - mean_b
         change = improvement_pct(mean_a, mean_b, direction)
-    t = df = p = ci_low = ci_high = None
+    t = df = p = p_one_sided = ci_low = ci_high = None
     if len(a) >= 2 and len(b) >= 2:
         welch = stats.welch_t_test(a, b)
         t, df, p = welch.t, welch.df, welch.p
+        p_one_sided = _one_sided_p(t, df, direction)
         ci_low, ci_high = stats.bootstrap_diff_ci(
             a, b, n_boot=n_boot, confidence=confidence, seed=seed
         )
+    wins = mw_p = None
+    if a and b:
+        # Mann-Whitney counts pairs where the first sample is larger: negate lower-is-better scores
+        sign = 1.0 if direction == "max" else -1.0
+        better_a, better_b = [sign * v for v in a], [sign * v for v in b]
+        wins = stats.mann_whitney_u(better_a, better_b)
+        mw_p = stats.mann_whitney_exact_p(better_a, better_b)
     return Comparison(
         arm_a=arm_a,
         arm_b=arm_b,
@@ -324,7 +349,10 @@ def compare_arms(
         t=t,
         df=df,
         p=p,
+        p_one_sided=p_one_sided,
         ci_low=ci_low,
         ci_high=ci_high,
         confidence=confidence,
+        wins=wins,
+        mw_p=mw_p,
     )

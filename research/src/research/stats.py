@@ -1,8 +1,8 @@
 """Small statistics toolkit, standard library only.
 
 Provides what the experiment analysis needs for comparing arms with a handful of replicates:
-mean and sample standard deviation, Welch's unequal-variance t-test, and a percentile bootstrap
-confidence interval for a difference of means.
+mean and sample standard deviation, Welch's unequal-variance t-test, a percentile bootstrap
+confidence interval for a difference of means, and an exact one-sided Mann-Whitney test.
 
 The Student-t distribution is evaluated through the regularized incomplete beta function,
 computed with the continued fraction of Numerical Recipes (section 6.4, modified Lentz method),
@@ -11,15 +11,19 @@ so no special-function library is needed.
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 __all__ = [
+    "MANN_WHITNEY_EXACT_MAX_N",
     "WelchResult",
     "betainc",
     "bootstrap_diff_ci",
+    "mann_whitney_exact_p",
+    "mann_whitney_u",
     "mean",
     "sample_sd",
     "student_t_cdf",
@@ -221,3 +225,49 @@ def bootstrap_diff_ci(
     )
     tail = (1.0 - confidence) / 2.0
     return _quantile(diffs, tail), _quantile(diffs, 1.0 - tail)
+
+
+# ---------------------------------------------------------------------------------------------
+# exact Mann-Whitney test
+# ---------------------------------------------------------------------------------------------
+
+MANN_WHITNEY_EXACT_MAX_N = 20  # C(20, 10) = 184,756 splits at most
+
+
+def mann_whitney_u(a: Sequence[float], b: Sequence[float]) -> float:
+    """Mann-Whitney U of `a`: the pairs (x from a, y from b) with x > y, a tie counting 1/2."""
+    return math.fsum((x > y) + 0.5 * (x == y) for x in a for y in b)
+
+
+def _doubled_midranks(values: Sequence[float]) -> list[int]:
+    """Twice the 1-based rank of each value, tied values sharing the mean of their ranks."""
+    order = sorted(range(len(values)), key=values.__getitem__)
+    doubled = [0] * len(values)
+    start = 0
+    while start < len(order):
+        end = start
+        while end + 1 < len(order) and values[order[end + 1]] == values[order[start]]:
+            end += 1
+        for position in range(start, end + 1):
+            doubled[order[position]] = start + end + 2  # (start + 1) + (end + 1)
+        start = end + 1
+    return doubled
+
+
+def mann_whitney_exact_p(a: Sequence[float], b: Sequence[float]) -> float | None:
+    """Exact one-sided p-value of the Mann-Whitney test that `a` tends to be larger than `b`.
+
+    The p-value is P(U >= observed U of `a`) when every split of the pooled values into groups
+    of len(a) and len(b) is equally likely, enumerated in full. U is a rank sum in disguise
+    (U = R_a - n_a (n_a + 1) / 2 with midranks), so ties are handled by conditioning on them.
+    None when a sample is empty or the pooled size exceeds `MANN_WHITNEY_EXACT_MAX_N`.
+    """
+    na, n = len(a), len(a) + len(b)
+    if na == 0 or len(b) == 0 or n > MANN_WHITNEY_EXACT_MAX_N:
+        return None
+    ranks = _doubled_midranks([*a, *b])  # integers, so the rank sums compare exactly
+    observed = sum(ranks[:na])
+    at_least = sum(
+        sum(ranks[i] for i in split) >= observed for split in itertools.combinations(range(n), na)
+    )
+    return at_least / math.comb(n, na)

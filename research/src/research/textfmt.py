@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-__all__ = ["fmt_num", "fmt_pct", "format_table"]
+__all__ = ["fmt_num", "fmt_pct", "fmt_share", "format_table"]
 
 
 def fmt_num(value: float | None) -> str:
@@ -19,6 +19,11 @@ def fmt_num(value: float | None) -> str:
 def fmt_pct(value: float | None) -> str:
     """Signed percentage with one decimal; "-" when undefined."""
     return "-" if value is None else f"{value:+.1f}%"
+
+
+def fmt_share(value: float | None) -> str:
+    """A fraction as a whole percentage ("66%"); "-" when undefined."""
+    return "-" if value is None else f"{100 * value:.0f}%"
 
 
 def format_table(

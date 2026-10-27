@@ -4,9 +4,10 @@
         --ref solo --compare team-forget:parallel --out out/paper-toy-mis --plots
 
 Prints Table 1 (final best per arm), Table 2 (mean best at the end of each round), anchoring
-traces, optional arm comparisons and a per-run listing. `--out` also writes each table as CSV;
-`--plots` adds PNG plots when matplotlib is installed. Definitions of the quantities are in
-`research.summary` and `research.tables`.
+traces, optional arm comparisons, a per-run listing, what the team forgets led to, the spend on
+empty turns and, with `--thresholds`, the cost of reaching given scores. `--out` also writes each
+table as CSV; `--plots` adds PNG plots when matplotlib is installed. Definitions of the
+quantities are in `research.summary`, `research.tables` and `research.outcomes`.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import argparse
 import csv
 import dataclasses
 import logging
+import math
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -22,7 +24,17 @@ from pathlib import Path
 from typing import Any
 
 from lethe.domain.types import Direction
+from research.outcomes import (
+    EmptyTurnRow,
+    ForgetOutcomeRow,
+    ThresholdRow,
+    empty_turn_table,
+    forget_outcome_table,
+    threshold_table,
+)
+from research.outcomes_text import render_empty_turns, render_forget_outcomes, render_thresholds
 from research.plots import load_pyplot, write_plots
+from research.stats import MANN_WHITNEY_EXACT_MAX_N
 from research.summary import (
     RoundScores,
     RunSummary,
@@ -43,7 +55,7 @@ from research.tables import (
     direction_of,
     round_table,
 )
-from research.textfmt import fmt_num, fmt_pct, format_table
+from research.textfmt import fmt_num, fmt_pct, fmt_share, format_table
 
 __all__ = [
     "Report",
@@ -53,6 +65,7 @@ __all__ = [
     "build_report",
     "fmt_num",
     "fmt_pct",
+    "fmt_share",
     "format_table",
     "load_summaries",
     "main",
@@ -81,6 +94,9 @@ class Report:
     rounds: tuple[RoundRow, ...]
     traces: tuple[TraceRow, ...]
     comparisons: tuple[Comparison, ...]
+    forget_outcomes: tuple[ForgetOutcomeRow, ...] = ()
+    empty_turns: tuple[EmptyTurnRow, ...] = ()
+    thresholds: tuple[ThresholdRow, ...] = ()  # one row per arm and requested threshold
 
 
 def build_report(
@@ -90,6 +106,7 @@ def build_report(
     ref: str | None = DEFAULT_REF,
     strict_ref: bool = False,
     compares: Sequence[tuple[str, str]] = (),
+    thresholds: Sequence[float] = (),
     bin_width: float | None = None,
     n_boot: int = 10_000,
     confidence: float = 0.95,
@@ -114,6 +131,9 @@ def build_report(
         rounds=tuple(round_table(summaries)),
         traces=tuple(anchoring_traces(summaries, bin_width=bin_width)),
         comparisons=comparisons,
+        forget_outcomes=tuple(forget_outcome_table(summaries)),
+        empty_turns=tuple(empty_turn_table(summaries)),
+        thresholds=tuple(threshold_table(summaries, thresholds)),
     )
 
 
@@ -177,12 +197,28 @@ def _render_comparison(c: Comparison) -> str:
     line += f"; mean {fmt_num(c.mean_a)} vs {fmt_num(c.mean_b)}, diff {c.diff:+,.4g}"
     if c.change_pct is not None:
         line += f" ({fmt_pct(c.change_pct)})"
-    if c.p is None or c.ci_low is None or c.ci_high is None or c.t is None or c.df is None:
-        return line + "; needs at least 2 valid runs per arm for the Welch test and bootstrap CI"
-    return (
-        f"{line}; Welch t={c.t:.3f} df={c.df:.1f} p={c.p:.4f}; "
-        f"{c.confidence:.0%} CI [{c.ci_low:+,.4g}, {c.ci_high:+,.4g}] (bootstrap)"
-    )
+    if (
+        c.t is None
+        or c.df is None
+        or c.p is None
+        or c.p_one_sided is None
+        or c.ci_low is None
+        or c.ci_high is None
+    ):
+        line += "; needs at least 2 valid runs per arm for the Welch test and bootstrap CI"
+    else:
+        line += (
+            f"; Welch t={c.t:.3f} df={c.df:.1f} p={c.p:.4f} (one-sided {c.p_one_sided:.4f}); "
+            f"{c.confidence:.0%} CI [{c.ci_low:+,.4g}, {c.ci_high:+,.4g}] (bootstrap)"
+        )
+    if c.wins is not None:
+        line += f"\n  Mann-Whitney: {c.arm_a} better in {c.wins:g} of {c.n_a * c.n_b} run pairs"
+        line += (
+            f", exact one-sided p={c.mw_p:.4f}"
+            if c.mw_p is not None
+            else f" (exact p only up to {MANN_WHITNEY_EXACT_MAX_N} runs)"
+        )
+    return line
 
 
 def _render_runs(report: Report) -> str:
@@ -226,8 +262,18 @@ def render_report(report: Report) -> str:
     ]
     if report.comparisons:
         lines = "\n".join(_render_comparison(c) for c in report.comparisons)
-        sections.append("Comparisons (difference of mean final best, A - B)\n" + lines)
-    sections.append(_render_runs(report))
+        note = (
+            "one-sided p-values test whether A is better than B; Mann-Whitney counts the run"
+            " pairs in which A ended better (a tie counts 1/2)"
+        )
+        sections.append(f"Comparisons (difference of mean final best, A - B)\n{lines}\n{note}")
+    sections += [
+        _render_runs(report),
+        render_forget_outcomes(report.forget_outcomes),
+        render_empty_turns(report.empty_turns),
+    ]
+    if report.thresholds:
+        sections.append(render_thresholds(report.thresholds, report.direction))
     return "\n\n".join(sections) + "\n"
 
 
@@ -279,9 +325,13 @@ def write_csvs(report: Report, out_dir: Path) -> list[Path]:
         ("table1.csv", report.arms, _columns(ArmRow)),
         ("table2.csv", report.rounds, _columns(RoundRow)),
         ("anchoring_traces.csv", report.traces, _columns(TraceRow)),
+        ("forget_outcomes.csv", report.forget_outcomes, _columns(ForgetOutcomeRow)),
+        ("empty_turns.csv", report.empty_turns, _columns(EmptyTurnRow)),
     ]
     if report.comparisons:
         tables.append(("comparisons.csv", report.comparisons, _columns(Comparison)))
+    if report.thresholds:
+        tables.append(("cost_to_threshold.csv", report.thresholds, _columns(ThresholdRow)))
     return [_write_csv(out_dir / name, rows, columns) for name, rows, columns in tables]
 
 
@@ -295,6 +345,18 @@ def _parse_compare(text: str) -> tuple[str, str]:
     if not sep or not arm_a or not arm_b or ":" in arm_b:
         raise ValueError(f"--compare expects A:B (two arm names), got {text!r}")
     return arm_a, arm_b
+
+
+def _parse_thresholds(text: str | None) -> tuple[float, ...]:
+    if text is None:
+        return ()
+    try:
+        values = [float(part) for part in text.split(",")]
+    except ValueError:
+        values = []
+    if not values or not all(math.isfinite(v) for v in values):
+        raise ValueError(f"--thresholds expects comma-separated scores, got {text!r}")
+    return tuple(dict.fromkeys(values))  # in the order given, without repeats
 
 
 def _fail(message: str) -> int:
@@ -319,7 +381,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="A:B",
-        help="Welch test and bootstrap CI of A against B (repeatable)",
+        help="Welch test, bootstrap CI and Mann-Whitney test of A against B (repeatable)",
+    )
+    parser.add_argument(
+        "--thresholds",
+        default=None,
+        metavar="S1,S2,...",
+        help="scores to report the cost of reaching, comma-separated (e.g. 1300,1200,1100)",
     )
     parser.add_argument("--out", type=Path, default=None, help="also write CSV files here")
     parser.add_argument("--plots", action="store_true", help="write PNG plots into --out")
@@ -345,6 +413,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _fail("--plots needs --out DIR to write the PNG files into")
     try:
         compares = [_parse_compare(text) for text in args.compare]
+        thresholds = _parse_thresholds(args.thresholds)
         summaries = load_summaries(args.experiment_dir, include_unfinished=args.include_unfinished)
         if not summaries:
             return _fail(
@@ -357,6 +426,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ref=args.ref or DEFAULT_REF,
             strict_ref=args.ref is not None,
             compares=compares,
+            thresholds=thresholds,
             bin_width=args.bin_width,
         )
     except (OSError, ValueError) as exc:

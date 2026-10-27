@@ -265,3 +265,94 @@ def test_comparison_with_an_arm_that_has_no_valid_run(make_summary: Factory) -> 
 def test_comparison_rejects_unknown_arms(make_summary: Factory) -> None:
     with pytest.raises(ValueError, match=r"nope.*team-forget, parallel"):
         compare_arms(welch_data(make_summary), "nope", "parallel")
+
+
+# ---------------------------------------------------------------------------------------------
+# comparisons: one-sided tests
+# ---------------------------------------------------------------------------------------------
+
+
+def test_one_sided_p_is_half_the_two_sided_p_when_a_is_ahead(make_summary: Factory) -> None:
+    c = compare_arms(welch_data(make_summary), "team-forget", "parallel", n_boot=100)
+    assert c.p_one_sided == pytest.approx(0.0320668355 / 2, abs=1e-8)
+
+
+def test_one_sided_p_follows_the_direction_of_the_task(make_summary: Factory) -> None:
+    # the same scores on a lower-is-better task: A's higher mean is now the worse one
+    c = compare_arms(
+        welch_data(make_summary, direction="min"), "team-forget", "parallel", n_boot=100
+    )
+    assert c.p_one_sided == pytest.approx(1 - 0.0320668355 / 2, abs=1e-8)
+
+
+def test_one_sided_p_of_the_swapped_comparison_is_the_complement(make_summary: Factory) -> None:
+    summaries = welch_data(make_summary)
+    forward = compare_arms(summaries, "team-forget", "parallel", n_boot=100)
+    backward = compare_arms(summaries, "parallel", "team-forget", n_boot=100)
+    assert backward.p_one_sided == pytest.approx(1 - forward.p_one_sided)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "expected"),
+    [([5.0, 5.0], [3.0, 3.0], 0.0), ([3.0, 3.0], [5.0, 5.0], 1.0), ([4.0, 4.0], [4.0, 4.0], 0.5)],
+)
+def test_one_sided_p_of_constant_samples(
+    make_summary: Factory, a: list[float], b: list[float], expected: float
+) -> None:
+    summaries = runs(make_summary, "a", a) + runs(make_summary, "b", b)
+    assert compare_arms(summaries, "a", "b", n_boot=10).p_one_sided == expected
+
+
+def test_one_sided_p_needs_the_welch_test(make_summary: Factory) -> None:
+    summaries = runs(make_summary, "a", [10.0]) + runs(make_summary, "b", [8.0, 9.0, 10.0])
+    assert compare_arms(summaries, "a", "b", n_boot=10).p_one_sided is None
+
+
+@pytest.mark.parametrize(
+    ("direction", "a", "b"),
+    [
+        ("max", [140.0, 150.0, 160.0], [120.0, 130.0, 135.0]),
+        ("min", [1100.0, 1150.0, 1120.0], [1300.0, 1250.0, 1400.0]),  # fewer cycles win
+    ],
+)
+def test_three_runs_beating_three_runs_win_all_nine_pairs(
+    make_summary: Factory, direction: str, a: list[float], b: list[float]
+) -> None:
+    summaries = runs(make_summary, "tf", a, direction=direction) + runs(
+        make_summary, "par", b, direction=direction
+    )
+
+    forward = compare_arms(summaries, "tf", "par", n_boot=10)
+    backward = compare_arms(summaries, "par", "tf", n_boot=10)
+
+    assert (forward.wins, forward.mw_p) == (9.0, pytest.approx(0.05))  # 1 of C(6, 3) splits
+    assert (backward.wins, backward.mw_p) == (0.0, 1.0)
+
+
+def test_mann_whitney_counts_a_tied_pair_as_half_a_win(make_summary: Factory) -> None:
+    summaries = runs(make_summary, "a", [10.0]) + runs(make_summary, "b", [8.0, 9.0, 10.0])
+
+    c = compare_arms(summaries, "a", "b", n_boot=10)
+
+    assert c.wins == 2.5  # it does not need two runs per arm, unlike Welch
+    assert c.mw_p == pytest.approx(0.5)  # midranks 3.5, 1, 2, 3.5: two of four reach 3.5
+
+
+def test_mann_whitney_skips_runs_without_a_valid_result(make_summary: Factory) -> None:
+    summaries = runs(make_summary, "a", [10.0, None, 12.0]) + runs(make_summary, "b", [1.0, None])
+    c = compare_arms(summaries, "a", "b", n_boot=10)
+    assert (c.wins, c.mw_p) == (2.0, pytest.approx(1 / 3))
+
+
+def test_mann_whitney_needs_a_valid_run_on_each_side(make_summary: Factory) -> None:
+    summaries = runs(make_summary, "a", [10.0, 11.0]) + runs(make_summary, "b", [None])
+    c = compare_arms(summaries, "a", "b", n_boot=10)
+    assert (c.wins, c.mw_p) == (None, None)
+
+
+def test_mann_whitney_p_is_not_enumerated_past_twenty_runs(make_summary: Factory) -> None:
+    summaries = runs(make_summary, "a", [float(v) for v in range(20, 31)]) + runs(
+        make_summary, "b", [float(v) for v in range(10)]
+    )
+    c = compare_arms(summaries, "a", "b", n_boot=10)
+    assert (c.wins, c.mw_p) == (110.0, None)

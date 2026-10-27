@@ -358,3 +358,64 @@ def test_bootstrap_rejects_empty_samples() -> None:
         stats.bootstrap_diff_ci([], [1.0])
     with pytest.raises(ValueError):
         stats.bootstrap_diff_ci([1.0], [])
+
+
+# ---------------------------------------------------------------------------------------------
+# exact one-sided Mann-Whitney test
+# ---------------------------------------------------------------------------------------------
+
+
+def test_mann_whitney_u_counts_the_pairs_where_a_is_larger() -> None:
+    assert stats.mann_whitney_u([5.0, 6.0, 7.0, 9.0], [1.0, 2.0, 3.0, 8.0]) == 13.0
+    assert stats.mann_whitney_u([3.0, 4.0, 5.0], [0.0, 1.0, 2.0]) == 9.0
+    assert stats.mann_whitney_u([0.0, 1.0, 2.0], [3.0, 4.0, 5.0]) == 0.0
+
+
+def test_mann_whitney_u_counts_a_tie_as_one_half() -> None:
+    assert stats.mann_whitney_u([1.0, 2.0], [1.0, 0.0]) == 3.5
+    assert stats.mann_whitney_u([2.0, 2.0], [2.0, 2.0]) == 2.0
+
+
+def test_mann_whitney_u_of_both_orders_adds_up_to_the_number_of_pairs() -> None:
+    a, b = [3.0, 1.0, 4.0, 1.0, 5.0], [9.0, 2.0, 6.0]
+    assert stats.mann_whitney_u(a, b) + stats.mann_whitney_u(b, a) == 15.0
+
+
+def test_exact_p_three_against_three_with_every_pair_won_is_one_in_twenty() -> None:
+    # only one of the C(6, 3) = 20 equally likely splits puts the three largest values in A
+    assert stats.mann_whitney_exact_p([4.0, 5.0, 6.0], [1.0, 2.0, 3.0]) == pytest.approx(0.05)
+
+
+def test_exact_p_with_every_pair_lost_is_one() -> None:
+    assert stats.mann_whitney_exact_p([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]) == 1.0
+
+
+def test_exact_p_matches_the_tabulated_null_distribution_for_four_against_four() -> None:
+    # U for m = n = 4 takes 0..16 with counts 1 1 2 3 5 5 7 7 8 7 7 5 5 3 2 1 1 (of 70 splits):
+    # P(U >= 13) = (3 + 2 + 1 + 1) / 70
+    p = stats.mann_whitney_exact_p([5.0, 6.0, 7.0, 9.0], [1.0, 2.0, 3.0, 8.0])
+    assert p == pytest.approx(7 / 70)
+
+
+def test_exact_p_conditions_on_the_observed_ties() -> None:
+    # pooled 1, 2, 1, 0 has midranks 2.5, 4, 2.5, 1; two of the six splits reach U = 3.5
+    assert stats.mann_whitney_exact_p([1.0, 2.0], [1.0, 0.0]) == pytest.approx(1 / 3)
+    assert stats.mann_whitney_exact_p([2.0, 2.0], [2.0, 2.0]) == 1.0
+
+
+def test_exact_p_works_with_unequal_and_single_observation_samples() -> None:
+    assert stats.mann_whitney_exact_p([10.0], [1.0, 2.0, 3.0]) == pytest.approx(1 / 4)
+    assert stats.mann_whitney_exact_p([1.0, 2.0, 3.0], [10.0]) == 1.0
+
+
+def test_exact_p_of_the_largest_enumerated_case() -> None:
+    a = [float(v) for v in range(10, 20)]
+    b = [float(v) for v in range(10)]
+    assert stats.mann_whitney_exact_p(a, b) == pytest.approx(1 / math.comb(20, 10))
+
+
+def test_exact_p_is_undefined_past_twenty_values_or_with_an_empty_sample() -> None:
+    eleven, ten = [float(v) for v in range(11)], [float(v) for v in range(10)]
+    assert stats.mann_whitney_exact_p(eleven, ten) is None
+    assert stats.mann_whitney_exact_p([], [1.0, 2.0]) is None
+    assert stats.mann_whitney_exact_p([1.0], []) is None

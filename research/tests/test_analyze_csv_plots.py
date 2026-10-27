@@ -32,7 +32,10 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 def test_write_csvs_creates_one_file_per_table(experiment: Path, tmp_path: Path) -> None:
     report = build_report(
-        load_summaries(experiment), experiment="x", compares=[("team-forget", "parallel")]
+        load_summaries(experiment),
+        experiment="x",
+        compares=[("team-forget", "parallel")],
+        thresholds=[150.0],
     )
     out = tmp_path / "out"
 
@@ -44,6 +47,9 @@ def test_write_csvs_creates_one_file_per_table(experiment: Path, tmp_path: Path)
         "table2.csv",
         "anchoring_traces.csv",
         "comparisons.csv",
+        "forget_outcomes.csv",
+        "empty_turns.csv",
+        "cost_to_threshold.csv",
     }
     assert all(p.parent == out and p.is_file() for p in written)
 
@@ -137,12 +143,68 @@ def test_comparisons_csv_contents(experiment: Path, tmp_path: Path) -> None:
     )
     assert float(row["diff"]) == pytest.approx(150.0 - 130.0)
     assert 0.0 <= float(row["p"]) <= 1.0
+    assert float(row["p_one_sided"]) == pytest.approx(float(row["p"]) / 2)
     assert float(row["ci_low"]) < float(row["diff"]) < float(row["ci_high"])
+    assert float(row["wins"]) == 8.5
+    assert float(row["mw_p"]) == pytest.approx(0.1)
 
 
-def test_no_comparisons_csv_without_comparisons(experiment: Path, tmp_path: Path) -> None:
+def test_no_comparisons_or_threshold_csv_unless_asked(experiment: Path, tmp_path: Path) -> None:
     written = write_csvs(build_report(load_summaries(experiment), experiment="x"), tmp_path)
-    assert "comparisons.csv" not in {p.name for p in written}
+    assert not {"comparisons.csv", "cost_to_threshold.csv"} & {p.name for p in written}
+
+
+def test_forget_outcomes_csv_contents(experiment: Path, tmp_path: Path) -> None:
+    write_csvs(build_report(load_summaries(experiment), experiment="x"), tmp_path)
+
+    (row,) = read_csv(tmp_path / "forget_outcomes.csv")
+
+    assert row == {
+        "arm": "team-forget",
+        "runs": "3",
+        "forgets": "3",
+        "new_bests": "3",
+        "new_best_rate": "1.0",
+    }
+
+
+def test_empty_turns_csv_contents(experiment: Path, tmp_path: Path) -> None:
+    write_csvs(build_report(load_summaries(experiment), experiment="x"), tmp_path)
+
+    rows = {r["arm"]: r for r in read_csv(tmp_path / "empty_turns.csv")}
+
+    assert set(rows) == {"solo", "parallel", "team-forget"}
+    solo = rows["solo"]
+    assert (solo["runs"], solo["turns"], solo["empty_turns"], solo["error_turns"]) == (
+        "3",
+        "12",
+        "6",
+        "0",
+    )
+    assert float(solo["empty_share"]) == 0.5
+    assert float(solo["spend_usd"]) == pytest.approx(4.5)
+    assert float(solo["empty_spend_usd"]) == pytest.approx(1.5)
+    assert float(solo["empty_spend_share"]) == pytest.approx(1 / 3)
+
+
+def test_cost_to_threshold_csv_contents(experiment: Path, tmp_path: Path) -> None:
+    report = build_report(load_summaries(experiment), experiment="x", thresholds=[150.0, 120.0])
+    write_csvs(report, tmp_path)
+
+    rows = read_csv(tmp_path / "cost_to_threshold.csv")
+
+    assert [(r["arm"], r["threshold"], r["reached"], r["runs"]) for r in rows] == [
+        ("solo", "150.0", "0", "3"),
+        ("solo", "120.0", "1", "3"),
+        ("parallel", "150.0", "0", "3"),
+        ("parallel", "120.0", "3", "3"),
+        ("team-forget", "150.0", "2", "3"),
+        ("team-forget", "120.0", "3", "3"),
+    ]
+    assert rows[0]["mean_spend"] == ""  # no run reached it
+    parallel = rows[3]
+    assert float(parallel["mean_spend"]) == pytest.approx(1.0)
+    assert (float(parallel["min_spend"]), float(parallel["max_spend"])) == (0.5, 1.25)
 
 
 # ---------------------------------------------------------------------------------------------

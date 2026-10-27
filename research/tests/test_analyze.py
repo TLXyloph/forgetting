@@ -18,6 +18,7 @@ from research.analyze import (
     build_report,
     fmt_num,
     fmt_pct,
+    fmt_share,
     format_table,
     main,
     render_report,
@@ -65,6 +66,13 @@ def test_fmt_num(value: float | None, expected: str) -> None:
 )
 def test_fmt_pct(value: float | None, expected: str) -> None:
     assert fmt_pct(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(None, "-"), (0.0, "0%"), (1 / 3, "33%"), (0.662, "66%"), (1.0, "100%")]
+)
+def test_fmt_share(value: float | None, expected: str) -> None:
+    assert fmt_share(value) == expected
 
 
 def test_format_table_aligns_columns() -> None:
@@ -151,6 +159,50 @@ def test_the_report_flags_a_run_with_an_unplanned_forget(tmp_path: Path, run_bui
     assert "unplanned" in listing and row.split()[-2] == "1"  # the count, before "ended"
 
 
+def test_new_sections_follow_the_per_run_listing(experiment: Path) -> None:
+    text = report_text(experiment, thresholds=[150.0])
+    order = ["\nRuns\n", "\nForget outcomes", "\nEmpty turns", "\nCost to reach"]
+    assert [text.index(title) for title in order] == sorted(text.index(t) for t in order)
+
+
+def test_forget_outcomes_in_the_report(experiment: Path) -> None:
+    text = report_text(experiment)
+    assert "team-forget: 3 of 3 forgets led to a new best within the next round" in text
+
+
+def test_forget_outcomes_without_forgetting_arms(tmp_path: Path, run_builder: type) -> None:
+    b = run_builder(tmp_path / "e" / "solo" / "rep1", agents=("a1",)).start(100.0)
+    b.candidate("a1", 110.0)
+    b.finish()
+    text = render_report(build_report(load_summaries(tmp_path / "e"), experiment="e"))
+    section = text[text.index("Forget outcomes") :].split("\n\n")[0]
+    assert "no arm has team forgets" in section
+
+
+def test_empty_turns_in_the_report(experiment: Path) -> None:
+    text = report_text(experiment)
+    section = text[text.index("Empty turns") :].split("\n\n")[0]
+    row = next(line for line in section.splitlines() if line.startswith("solo "))
+    # 3 runs of four turns, two of them empty and costing 0.25 of each run's 1.5
+    assert row.split() == ["solo", "3", "12", "6", "0", "50%", "4.50", "1.50", "33%"]
+
+
+def test_cost_to_reach_is_reported_only_for_requested_thresholds(experiment: Path) -> None:
+    assert "Cost to reach" not in report_text(experiment)
+
+    text = report_text(experiment, thresholds=[150.0, 120.0])
+
+    section = text[text.index("Cost to reach") :].split("\n\n")[0]
+    arms = ("solo", "parallel", "team-forget")
+    rows = [line.split() for line in section.splitlines() if line.split()[0] in arms]
+    assert rows[:2] == [
+        ["solo", "150", "0/3", "-", "-", "-"],
+        ["solo", "120", "1/3", "1.25", "1.25", "1.25"],
+    ]
+    assert ["team-forget", "150", "2/3", "1.25", "1.25", "1.25"] in rows
+    assert ["parallel", "120", "3/3", "1.00", "0.50", "1.25"] in rows
+
+
 def test_report_includes_a_per_run_listing(experiment: Path) -> None:
     text = report_text(experiment)
     assert "solo/rep1" in text
@@ -165,6 +217,16 @@ def test_comparison_line_in_the_report(experiment: Path) -> None:
     assert "95% CI" in text
 
 
+def test_comparison_line_reports_the_one_sided_tests(experiment: Path) -> None:
+    text = report_text(experiment, compares=[("team-forget", "parallel")])
+    # means 150 vs 130, sd 10 each: t = 2.449 on 4 df, two-sided p 0.0705, one-sided 0.0352
+    assert "p=0.0705 (one-sided 0.0352)" in text
+    # 140 ties 140, every other pair is won; 2 of the C(6, 3) splits reach the observed ranks
+    assert (
+        "Mann-Whitney: team-forget better in 8.5 of 9 run pairs, exact one-sided p=0.1000" in text
+    )
+
+
 def test_comparison_with_too_few_runs_explains_itself(tmp_path: Path, run_builder: type) -> None:
     for arm in ("a", "b"):
         b = run_builder(tmp_path / "e" / arm / "rep1", agents=("a1",)).start(100.0)
@@ -174,6 +236,8 @@ def test_comparison_with_too_few_runs_explains_itself(tmp_path: Path, run_builde
         build_report(load_summaries(tmp_path / "e"), experiment="e", compares=[("a", "b")])
     )
     assert "at least 2" in text
+    # Mann-Whitney needs no second run; both splits of a tie reach the observed U
+    assert "better in 0.5 of 1 run pairs, exact one-sided p=1.0000" in text
 
 
 def test_build_report_validates_the_reference_and_comparisons(experiment: Path) -> None:
@@ -285,6 +349,29 @@ def test_cli_rejects_bad_arm_arguments(
 ) -> None:
     assert main([str(experiment), *extra]) == 2
     assert "error" in capsys.readouterr().err.lower()
+
+
+def test_cli_thresholds(
+    experiment: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out_dir = tmp_path / "o"
+
+    assert main([str(experiment), "--thresholds", "150, 120", "--out", str(out_dir)]) == 0
+
+    assert "Cost to reach" in capsys.readouterr().out
+    rows = read_csv(out_dir / "cost_to_threshold.csv")
+    assert [(r["arm"], float(r["threshold"]), r["reached"]) for r in rows[:2]] == [
+        ("solo", 150.0, "0"),
+        ("solo", 120.0, "1"),
+    ]
+
+
+@pytest.mark.parametrize("text", ["abc", "150,,120", "150,nan", "inf", ""])
+def test_cli_rejects_bad_thresholds(
+    experiment: Path, text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([str(experiment), "--thresholds", text]) == 2
+    assert "--thresholds" in capsys.readouterr().err
 
 
 def test_cli_missing_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

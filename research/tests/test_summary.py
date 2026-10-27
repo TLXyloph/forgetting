@@ -77,6 +77,7 @@ def test_per_turn_records_carry_cumulative_spend(tmp_path: Path, run_builder: ty
         thinking_tokens=300,
         status="candidate",
         plateau_claim=False,
+        cost=0.5,
     )
     assert s.turns[1] == TurnRecord(
         spend=0.75,
@@ -85,7 +86,26 @@ def test_per_turn_records_carry_cumulative_spend(tmp_path: Path, run_builder: ty
         thinking_tokens=50,
         status="empty",
         plateau_claim=True,
+        cost=0.25,
     )
+
+
+def test_per_turn_records_carry_their_own_cost(tmp_path: Path, run_builder: type) -> None:
+    s = summarize_run(solo_run(run_builder, tmp_path / "r"), arm="solo", rep=1)
+    assert [t.cost for t in s.turns] == [0.5, 0.25, 0.25, 0.5, 0.5]
+    assert sum(t.cost for t in s.turns) == pytest.approx(s.spend_usd)
+
+
+def test_a_turn_record_built_without_a_cost_costs_nothing() -> None:
+    record = TurnRecord(
+        spend=1.0,
+        lines_changed=0,
+        output_tokens=0,
+        thinking_tokens=0,
+        status="empty",
+        plateau_claim=False,
+    )
+    assert record.cost == 0.0
 
 
 def test_a_tie_with_the_best_is_not_an_improvement(tmp_path: Path, run_builder: type) -> None:
@@ -234,6 +254,7 @@ def test_error_turns_cost_money_but_are_not_proposals(tmp_path: Path, run_builde
     assert s.spend_usd == pytest.approx(1.0)
     assert [t.status for t in s.turns] == ["candidate", "error", "empty"]
     assert s.turns[1].spend == 0.75
+    assert s.turns[1].cost == 0.25
 
 
 def test_rate_limit_events_do_not_disturb_the_summary(tmp_path: Path, run_builder: type) -> None:

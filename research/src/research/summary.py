@@ -64,7 +64,8 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TurnRecord:
-    """One agent turn. `spend` is the run's cumulative spend (USD) at the end of the turn."""
+    """One agent turn. `spend` is the run's cumulative spend (USD) at the end of the turn,
+    `cost` what the turn itself cost."""
 
     spend: float
     lines_changed: int
@@ -72,6 +73,7 @@ class TurnRecord:
     thinking_tokens: int
     status: TurnStatus
     plateau_claim: bool
+    cost: float = 0.0
 
 
 class RoundScores(NamedTuple):
@@ -207,6 +209,7 @@ class _Fold:
                 thinking_tokens=event.thinking_tokens,
                 status=event.status,
                 plateau_claim=event.plateau_claim,
+                cost=event.cost_usd,
             )
         )
 
