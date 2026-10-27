@@ -35,6 +35,7 @@ class FakeClaude:
         big_line: int | None = None,
         strip_newline: bool = False,
         skip_stdin: bool = False,
+        stdin_wait_s: float | None = None,
         self_kill: bool = False,
     ) -> FakeClaude:
         """Choose what the next invocations do.
@@ -51,6 +52,7 @@ class FakeClaude:
             "FAKE_CLAUDE_BIG_LINE": None if big_line is None else str(big_line),
             "FAKE_CLAUDE_STRIP_NEWLINE": "1" if strip_newline else None,
             "FAKE_CLAUDE_SKIP_STDIN": "1" if skip_stdin else None,
+            "FAKE_CLAUDE_STDIN_WAIT": None if stdin_wait_s is None else str(stdin_wait_s),
             "FAKE_CLAUDE_SELF_KILL": "1" if self_kill else None,
         }
         for name, value in env.items():

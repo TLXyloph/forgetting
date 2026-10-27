@@ -281,11 +281,19 @@ class _TurnLog:
             _LOG.warning("transcript write failed (%s); continuing without the transcript", exc)
 
 
-async def _feed_stdin(stdin: asyncio.StreamWriter, data: bytes) -> None:
-    """Send the prompt and close stdin. A child that exits early is not an error here: its exit
-    status and missing result line are reported by the caller."""
+def _start_stdin(stdin: asyncio.StreamWriter, data: bytes) -> None:
+    """Hand the prompt to the pipe now, before the event loop runs anything else. The CLI waits
+    only 3 s for stdin before running without a prompt, and other agents' synchronous work can
+    hold the loop that long; bytes already in the pipe do not depend on the loop."""
     with contextlib.suppress(OSError):  # BrokenPipeError, ConnectionResetError, ...
         stdin.write(data)
+
+
+async def _finish_stdin(stdin: asyncio.StreamWriter) -> None:
+    """Flush what the pipe did not take at once (a prompt larger than its buffer) and close
+    stdin. A child that exits early is not an error here: its exit status and missing result
+    line are reported by the caller."""
+    with contextlib.suppress(OSError):
         await stdin.drain()
         stdin.close()
         await stdin.wait_closed()
@@ -305,8 +313,9 @@ async def _drive(
         stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
         if stdin is None or stdout is None or stderr is None:
             raise RuntimeError("subprocess pipes were not created")
+        _start_stdin(stdin, stdin_bytes)
         tasks = [
-            asyncio.ensure_future(_feed_stdin(stdin, stdin_bytes)),
+            asyncio.ensure_future(_finish_stdin(stdin)),
             asyncio.ensure_future(log.pump_stdout(stdout)),
             asyncio.ensure_future(log.pump_stderr(stderr)),
         ]

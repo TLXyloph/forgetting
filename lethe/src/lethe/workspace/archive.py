@@ -7,6 +7,7 @@ what the materializer copies into their workspace. Forgetting never deletes from
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import os
 import re
@@ -26,6 +27,7 @@ _REF_PREFIX = "refs/lethe/"
 _FILE_MODE = "100644"
 _EXEC_MODE = "100755"
 _SYMLINK_MODE = "120000"
+_READ_CACHE = 1024  # memoized trees and diffs per archive (commits never change)
 
 # Every git call runs with this identity and without any user or system config, so results never
 # depend on who runs the harness (signing, EOL conversion, hooks, templates...).
@@ -99,6 +101,10 @@ class Archive:
         self.index_dir = self.git_dir.parent / "index"
         self.judged = judged
         self.exclude = exclude
+        # Every agent turn re-reads the same lineage and peer candidates; commits never change,
+        # so their trees and diffs are read from git once (thread-safe, bounded).
+        self._tree_cache = functools.lru_cache(maxsize=_READ_CACHE)(self._read_tree)
+        self._diff_cache = functools.lru_cache(maxsize=_READ_CACHE)(self._read_diff)
         if not (self.git_dir / "HEAD").exists():
             self.git_dir.mkdir(parents=True, exist_ok=True)
             self._git("init", "--bare", "-q")
@@ -172,6 +178,9 @@ class Archive:
         _check_oid(sha)
         if base_sha is not None:
             _check_oid(base_sha)
+        return self._diff_cache(base_sha, sha, judged_only)
+
+    def _read_diff(self, base_sha: str | None, sha: str, judged_only: bool) -> str:
         args = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"]
         args += [self.empty_tree if base_sha is None else base_sha, sha]
         if judged_only:
@@ -299,7 +308,11 @@ class Archive:
         return Snapshot(sha, key, added, deleted, changed, key != self.judged_key(parent_sha))
 
     def _ls_tree(self, sha: str) -> _Entries:
-        """Regular files of commit `sha`; symlinks and submodules never come from `snapshot`."""
+        """Regular files of commit `sha`; symlinks and submodules never come from `snapshot`.
+        A fresh dict each call: the memoized one is never handed out."""
+        return dict(self._tree_cache(sha))
+
+    def _read_tree(self, sha: str) -> _Entries:
         _check_oid(sha)
         out = self._git("ls-tree", "-r", "-z", "--full-tree", sha)
         entries: _Entries = {}

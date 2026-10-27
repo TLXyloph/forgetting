@@ -150,6 +150,27 @@ def test_a_prompt_larger_than_the_pipe_buffers_is_delivered_intact(
     assert fake_claude.stdin == prompt.encode("utf-8")
 
 
+def test_the_prompt_is_in_the_pipe_before_the_event_loop_runs_anything_else(
+    fake_claude: Any, workspace: Path, transcript: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real CLI waits only 3 s for stdin, then runs without a prompt. Another agent's
+    # synchronous work (planning its turn) can hold the event loop that long right after a spawn.
+    fake_claude.script(stream="turn1.jsonl", stdin_wait_s=0.5)
+    spawn = asyncio.create_subprocess_exec
+
+    async def spawn_then_block_the_loop(*args: Any, **kwargs: Any) -> Any:
+        proc = await spawn(*args, **kwargs)
+        asyncio.get_running_loop().call_soon(time.sleep, 1.5)  # runs at the next yield
+        return proc
+
+    monkeypatch.setattr(claude_code.asyncio, "create_subprocess_exec", spawn_then_block_the_loop)
+
+    result = run(fake_claude.backend(), workspace, transcript, prompt="Improve the solver.")
+
+    assert result.ok, result.error
+    assert fake_claude.stdin == b"Improve the solver."
+
+
 def test_a_child_that_never_reads_stdin_neither_hangs_nor_crashes_the_backend(
     fake_claude: Any, workspace: Path, transcript: Path
 ) -> None:

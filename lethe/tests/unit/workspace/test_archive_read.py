@@ -184,3 +184,45 @@ def test_diff_reports_binary_changes_without_dumping_them(
 
     assert "Binary files" in text
     assert "weights.bin" in text
+
+
+# --- memoized reads ----------------------------------------------------------------------------
+
+
+def count_git_calls(archive, monkeypatch) -> list[tuple[str, ...]]:
+    calls: list[tuple[str, ...]] = []
+    real = archive._git
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(archive, "_git", counting)
+    return calls
+
+
+def test_repeated_reads_of_a_commit_run_git_once(
+    make_tree, take, archive, tmp_path, seed_files, monkeypatch
+):
+    # Commits are immutable, and every agent turn re-reads the same lineage and peer cards: a
+    # reader that shells out each time holds the orchestrator's event loop for seconds.
+    first, second = edited_pair(make_tree, take, tmp_path, seed_files)
+    calls = count_git_calls(archive, monkeypatch)
+
+    once = (archive.diff(first.sha, second.sha), archive.files(second.sha))
+    after_first = len(calls)
+    again = (archive.diff(first.sha, second.sha), archive.files(second.sha))
+
+    assert after_first > 0 and len(calls) == after_first
+    assert again == once
+    assert archive.diff(first.sha, second.sha, judged_only=False) != once[0]  # its own entry
+
+
+def test_a_caller_cannot_change_what_later_reads_return(
+    make_tree, take, archive, tmp_path, seed_files
+):
+    snap = take(make_tree(tmp_path / "wd", seed_files))
+
+    archive.files(snap.sha).clear()
+
+    assert len(archive.files(snap.sha)) == len(seed_files)

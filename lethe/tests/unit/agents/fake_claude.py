@@ -13,6 +13,8 @@ starting the real CLI (no network, no credentials). It is not a test module.
   FAKE_CLAUDE_STDERR_FILE    file whose bytes are written to stderr (for large output)
   FAKE_CLAUDE_EXIT           exit status (default 0)
   FAKE_CLAUDE_SKIP_STDIN     "1": never read stdin (exit while the caller is still writing)
+  FAKE_CLAUDE_STDIN_WAIT     seconds to wait for stdin data; with none by then, warn and exit 1
+                             without a stream, as the real CLI does after 3 s
   FAKE_CLAUDE_CHILD          "group": spawn a sleeping grandchild in the same process group
   FAKE_CLAUDE_HANG           seconds to sleep after the output has been written and flushed
   FAKE_CLAUDE_SELF_KILL      "1": SIGKILL itself at the very end instead of exiting normally
@@ -20,6 +22,7 @@ starting the real CLI (no network, no credentials). It is not a test module.
 
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -44,6 +47,10 @@ def main() -> int:
     _record(record, "cwd.txt", os.getcwd().encode("utf-8"))
     _record(record, "env.json", json.dumps(sorted(os.environ)).encode("utf-8"))  # names only
 
+    wait = env.get("FAKE_CLAUDE_STDIN_WAIT")
+    if wait and not select.select([sys.stdin], [], [], float(wait))[0]:
+        sys.stderr.write(f"Warning: no stdin data received in {wait}s, proceeding without it.\n")
+        return 1
     if env.get("FAKE_CLAUDE_SKIP_STDIN") != "1":
         _record(record, "stdin.bin", sys.stdin.buffer.read())
 
