@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from lethe.policy.triggers import ForgetDecision
 from lethe.runtime.barrier import ForgetBarrier
 
@@ -85,3 +87,20 @@ def test_barrier_can_be_reused_for_a_second_forget():
 
     asyncio.run(main())
     assert commits == [DECISION, DECISION]
+
+
+def test_a_failing_commit_still_releases_the_waiting_agents():
+    async def main():
+        async def commit(decision):
+            raise RuntimeError("disk full")
+
+        barrier = ForgetBarrier(commit, active=("a1", "a2"))
+        barrier.request(DECISION)
+        waiting = asyncio.create_task(barrier.arrive("a1"))
+        await asyncio.sleep(0.01)
+        with pytest.raises(RuntimeError, match="disk full"):
+            await barrier.arrive("a2")  # the last arrival runs the commit, and sees it fail
+        await asyncio.wait_for(waiting, 1)  # ... but nobody is left waiting for a release
+        assert barrier.pending is None
+
+    asyncio.run(main())

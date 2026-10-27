@@ -6,49 +6,107 @@ cwd = the judge tree (the seed with the candidate's editable files overlaid).
   1. Correctness gate: about sixty hidden, generated cases of many kinds are run in one subprocess.
      Any mismatch makes the candidate invalid; the feedback names the failing case *kinds* only,
      never their contents.
-  2. Timing: `top_words(corpus, 50)` on a fixed generated corpus of about 300k words, in five
-     fresh subprocesses (so nothing can be cached between runs); only the call is timed, and each
-     run's output is checked against the reference as well.
+  2. Timing: `top_words(corpus, 50)` in five fresh subprocesses, each on its own corpus of about
+     300k words drawn afresh for every evaluation from LETHE_SEED, so nothing can be precomputed
+     or carried from one run to the next. The clock runs here, never in the candidate's process:
+     the child imports the candidate and says it is ready, the judge starts the clock and sends
+     the corpus on stdin, and the clock stops when the child's result arrives. Every result is
+     checked against the reference.
          score = median wall-clock milliseconds of those five calls     (minimize)
 
-The data (reference, corpus, gate cases) lives in the sibling module wordfreq_data.py and is
-generated from fixed seeds, so every machine and Python version sees identical text. Prints exactly
-one JSON line; exit 75 means the judge itself broke, never the candidate.
+Candidate code runs as `python -s -B -c <runner>`: the runner is inline (the candidate never
+learns where this file is), its data comes on stdin (never as a path), and its environment holds
+no LETHE_* variables and no credentials. The data (reference, corpora, gate cases) lives in the
+sibling module wordfreq_data.py. Prints exactly one JSON line; exit 75 means the judge itself
+broke, never the candidate.
 """
 
 from __future__ import annotations
 
 import contextlib
 import functools
-import gc
 import importlib.util
 import json
 import os
+import selectors
 import signal
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
+import zlib
 from collections import Counter
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import IO, Any
 
 try:
     import resource
 except ImportError:  # pragma: no cover - non-POSIX
     resource = None  # type: ignore[assignment]
 
-# Bound before any candidate code is imported, so the candidate cannot replace the clock used to
-# time it (a module-level `time.perf_counter = ...` in the candidate would not affect this name).
-_perf_counter = time.perf_counter
 TIMING_K = 50
 TIMING_RUNS = 5
 GATE_TIMEOUT_S = 60.0
-RUN_TIMEOUT_S = 30.0
+RUN_TIMEOUT_S = 30.0  # per timed run: import, the call, and the replies
 MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_REPLY_BYTES = 4 * 1024 * 1024  # a timed reply is a few kB: a longer line is a broken reply
+# All the candidate inherits from the judge's environment (plus LC_*): enough to run Python.
+INHERITED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TEMP", "TMP")
+INHERITED_ENV += ("TZ", "SYSTEMROOT")
+
+# The runner the candidate's process executes (`python -s -B -c`). It imports the candidate from
+# the judge tree, and replies with one JSON object per line on its real stdout; the candidate's
+# own prints go to stderr.
+PRELUDE = """
+import json, os, sys, traceback
+root = os.getcwd()
+sys.path.insert(0, root)
+reply = sys.stdout
+sys.stdout = sys.stderr
+
+def where(exc):
+    frames = [f"{os.path.relpath(f.filename, root)}:{f.lineno} in {f.name}"
+              for f in traceback.extract_tb(exc.__traceback__) if f.filename.startswith(root)]
+    return f" at {frames[-1]}" if frames else ""
+
+def send(line):
+    reply.write(line + "\\n")
+    reply.flush()
+
+try:
+    from wordfreq import top_words
+except Exception as exc:
+    send(json.dumps({"fatal": f"{type(exc).__name__}{where(exc)}"}))
+    sys.exit(1)
+"""
+GATE_RUNNER = (
+    PRELUDE
+    + """
+for i, (text, k) in enumerate(json.loads(sys.stdin.read())):
+    try:
+        send(json.dumps({"i": i, "result": top_words(text, k)}))
+    except Exception as exc:
+        send(json.dumps({"i": i, "error": f"raised {type(exc).__name__}{where(exc)}"}))
+"""
+)
+TIME_RUNNER = (
+    PRELUDE
+    + """
+import gc
+k = int(sys.argv[1])
+gc.collect()
+send(json.dumps({"ready": True}))
+text = sys.stdin.buffer.read().decode("utf-8")
+try:
+    send(json.dumps({"result": top_words(text, k)}))
+except Exception as exc:
+    send(json.dumps({"error": f"raised {type(exc).__name__}{where(exc)}"}))
+"""
+)
 
 
 def _sibling(name: str) -> ModuleType:
@@ -92,61 +150,28 @@ def _kill_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
 
 
-def _candidate_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("LETHE_")}
-    env.update(PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1")
+def candidate_env() -> dict[str, str]:
+    """Just enough to run Python: no LETHE_* variables (no seed, no paths), no credentials."""
+    env = {k: v for k, v in os.environ.items() if k in INHERITED_ENV or k.startswith("LC_")}
+    env["PYTHONHASHSEED"] = "0"  # identical candidates must score identically
     return env
 
 
-def run_child(
-    args: list[str], stderr_path: Path, cwd: Path, timeout: float
-) -> tuple[int, bool, float]:
-    """Run this file in child mode on the candidate: (exit code, timed_out, wall seconds)."""
-    argv = [sys.executable, "-P", str(Path(__file__).resolve()), *args]
-    with open(stderr_path, "wb") as stderr:
-        started = time.perf_counter()
-        proc = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=_candidate_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr,
-            start_new_session=True,
-            preexec_fn=functools.partial(_limits, max(60, int(timeout * 8))),
-        )
-        timed_out = False
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        finally:
-            _kill_group(proc.pid)
-        proc.wait()
-    return proc.returncode, timed_out, time.perf_counter() - started
+def spawn(runner: str, args: list[str], cwd: Path, **pipes: Any) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [sys.executable, "-s", "-B", "-c", runner, *args],
+        cwd=cwd,
+        env=candidate_env(),
+        start_new_session=True,
+        preexec_fn=functools.partial(_limits, max(60, int(GATE_TIMEOUT_S * 8))),
+        **pipes,
+    )
 
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    out = []
-    for line in text.splitlines():
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue  # a line cut off by the kill
-        if isinstance(rec, dict):
-            out.append(rec)
-    return out
-
-
-def tail(path: Path, limit: int = 600) -> str:
-    try:
-        return path.read_bytes()[-limit:].decode("utf-8", errors="replace").strip()
-    except OSError:
-        return ""
+def tail_of(stream: IO[bytes], limit: int = 600) -> str:
+    stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, stream.tell() - limit))
+    return stream.read().decode("utf-8", errors="replace").strip()
 
 
 def describe_exit(code: int) -> str:
@@ -156,6 +181,18 @@ def describe_exit(code: int) -> str:
         except ValueError:
             return f"was killed by signal {-code}"
     return f"exited with code {code}"
+
+
+def parse_lines(data: bytes) -> list[dict[str, Any]]:
+    out = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue  # a line cut off by the kill
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
 
 
 def normalize(result: object) -> list[tuple[str, int]] | None:
@@ -173,6 +210,44 @@ def normalize(result: object) -> list[tuple[str, int]] | None:
     return out
 
 
+class Replies:
+    """The child's reply lines, read from its stdout pipe against a deadline."""
+
+    def __init__(self, pipe: IO[bytes]) -> None:
+        self._fd = pipe.fileno()
+        self._buffer = b""
+        self._selector = selectors.DefaultSelector()
+        self._selector.register(self._fd, selectors.EVENT_READ)
+
+    def next(self, deadline: float) -> tuple[str, dict[str, Any]]:
+        """("ok", record), or ("timeout" | "closed" | "garbled", {})."""
+        while b"\n" not in self._buffer:
+            if len(self._buffer) > MAX_REPLY_BYTES:
+                return "garbled", {}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._selector.select(remaining):
+                return "timeout", {}
+            chunk = os.read(self._fd, 1 << 16)
+            if not chunk:
+                return "closed", {}
+            self._buffer += chunk
+        line, _, self._buffer = self._buffer.partition(b"\n")
+        try:
+            record = json.loads(line)
+        except ValueError:
+            return "garbled", {}
+        return ("ok", record) if isinstance(record, dict) else ("garbled", {})
+
+    def close(self) -> None:
+        self._selector.close()
+
+
+def _send(stdin: IO[bytes], data: bytes) -> None:
+    with contextlib.suppress(OSError):  # the child may die or close stdin early
+        stdin.write(data)
+        stdin.close()
+
+
 # ---------------------------------------------------------------------------------------------
 # the judge
 # ---------------------------------------------------------------------------------------------
@@ -182,28 +257,36 @@ def invalid(feedback: str, **metrics: Any) -> dict[str, Any]:
     return {"valid": False, "feedback": feedback, "metrics": metrics}
 
 
-def run_gate(scratch: Path, cwd: Path) -> dict[str, Any] | None:
+def run_gate(cwd: Path) -> dict[str, Any] | None:
     """None when every hidden case passes; otherwise an invalid result."""
     cases = gate_cases()
-    cases_path, out_path, err_path = (
-        scratch / "cases.json",
-        scratch / "gate.jsonl",
-        scratch / "gate.err",
-    )
-    cases_path.write_text(json.dumps(cases))
-    code, timed_out, _ = run_child(
-        ["--gate", str(cases_path), str(out_path)], err_path, cwd, GATE_TIMEOUT_S
-    )
-    records = {r["i"]: r for r in read_jsonl(out_path) if isinstance(r.get("i"), int)}
-    fatal = next((r for r in read_jsonl(out_path) if "fatal" in r), None)
+    payload = json.dumps([[text, k] for _kind, text, k in cases]).encode("utf-8")
+    with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as out:
+        stdin.write(payload)
+        stdin.seek(0)
+        with tempfile.TemporaryFile() as err:
+            proc = spawn(GATE_RUNNER, [], cwd, stdin=stdin, stdout=out, stderr=err)
+            timed_out = False
+            try:
+                proc.wait(timeout=GATE_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            finally:
+                _kill_group(proc.pid)
+            code = proc.wait()
+            stderr_tail = tail_of(err)
+        out.seek(0)
+        replies = parse_lines(out.read(MAX_FILE_BYTES))
+    fatal = next((r for r in replies if "fatal" in r), None)
     if fatal is not None:
         return invalid(f"The candidate could not be loaded: {fatal['fatal']}")
+    records = {r["i"]: r for r in replies if isinstance(r.get("i"), int)}
     if timed_out or len(records) < len(cases):
         stuck = next((cases[i][0] for i in range(len(cases)) if i not in records), "?")
         how = (
             f"timed out after {GATE_TIMEOUT_S:g} s"
             if timed_out
-            else f"{describe_exit(code)}" + (f" ({tail(err_path)})" if tail(err_path) else "")
+            else describe_exit(code) + (f" ({stderr_tail})" if stderr_tail else "")
         )
         return invalid(
             f"The correctness cases did not finish: the candidate process {how} on a case of kind "
@@ -234,38 +317,68 @@ def run_gate(scratch: Path, cwd: Path) -> dict[str, Any] | None:
     )
 
 
-def run_timing(scratch: Path, cwd: Path, corpus: str) -> dict[str, Any]:
-    corpus_path = scratch / "corpus.txt"
-    corpus_path.write_text(corpus, encoding="utf-8")
-    expected = reference(corpus, TIMING_K)
-    millis: list[float] = []
-    for run in range(1, TIMING_RUNS + 1):
-        out_path, err_path = scratch / f"time{run}.json", scratch / f"time{run}.err"
-        code, timed_out, wall = run_child(
-            ["--time", str(corpus_path), str(TIMING_K), str(out_path)], err_path, cwd, RUN_TIMEOUT_S
+def time_one(cwd: Path, corpus: bytes, run: int) -> tuple[float | None, dict[str, Any] | str]:
+    """One timed call in a fresh child: (seconds, its result record), or (None, why it failed)."""
+    with tempfile.TemporaryFile() as err:
+        proc = spawn(
+            TIME_RUNNER,
+            [str(TIMING_K)],
+            cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=err,
         )
-        recs = read_jsonl(out_path)
-        rec = recs[0] if recs else {}
-        if timed_out:
-            return invalid(
-                f"Timing run {run} exceeded {RUN_TIMEOUT_S:g} s on the benchmark corpus."
-            )
-        if "fatal" in rec or "error" in rec:
-            return invalid(f"Timing run {run} failed: {rec.get('fatal') or rec['error']}")
-        if "seconds" not in rec:
-            detail = tail(err_path)
-            return invalid(
-                f"Timing run {run}: the candidate process {describe_exit(code)}."
-                + (f" stderr tail: {detail}" if detail else "")
-            )
-        seconds = rec["seconds"]
-        if (
-            isinstance(seconds, bool)
-            or not isinstance(seconds, (int, float))
-            or not (0 < seconds <= wall)
-        ):
-            return invalid(f"Timing run {run}: the reported call time is not credible.")
-        if normalize(rec.get("result")) != expected:
+        assert proc.stdin is not None and proc.stdout is not None
+        replies, sending = Replies(proc.stdout), False
+        try:
+            deadline = time.monotonic() + RUN_TIMEOUT_S
+            state, ready = replies.next(deadline)
+            if state == "ok" and ready.get("ready") is True:
+                started = time.perf_counter()
+                sending = True
+                threading.Thread(target=_send, args=(proc.stdin, corpus), daemon=True).start()
+                state, record = replies.next(deadline)
+                seconds = time.perf_counter() - started
+                if state == "ok":
+                    return seconds, record
+            elif state == "ok" and "fatal" in ready:
+                return None, f"Timing run {run} failed: {ready['fatal']}"
+        finally:
+            _kill_group(proc.pid)
+            code = proc.wait()
+            replies.close()
+            proc.stdout.close()
+            if not sending:
+                with contextlib.suppress(OSError):
+                    proc.stdin.close()
+        if state == "timeout":
+            return None, f"Timing run {run} exceeded {RUN_TIMEOUT_S:g} s on the benchmark corpus."
+        detail = tail_of(err)
+        return None, (
+            f"Timing run {run}: the candidate process {describe_exit(code)} without a result."
+            + (f" stderr tail: {detail}" if detail else "")
+        )
+
+
+def timing_corpora() -> list[str]:
+    """The corpora of this evaluation: drawn afresh from LETHE_SEED, one per timed run."""
+    try:
+        base = int(os.environ.get("LETHE_SEED", "0"))
+    except ValueError:
+        base = 0
+    seeds = [zlib.crc32(f"word-freq/timing/{base}/{run}".encode()) for run in range(TIMING_RUNS)]
+    return [build_corpus(seed) for seed in seeds]
+
+
+def run_timing(cwd: Path, corpora: list[str]) -> dict[str, Any]:
+    millis: list[float] = []
+    for run, corpus in enumerate(corpora, start=1):
+        seconds, outcome = time_one(cwd, corpus.encode("utf-8"), run)
+        if seconds is None or isinstance(outcome, str):
+            return invalid(str(outcome))
+        if "error" in outcome:
+            return invalid(f"Timing run {run} failed: {outcome['error']}")
+        if normalize(outcome.get("result")) != reference(corpus, TIMING_K):
             return invalid(
                 f"Timing run {run}: the output on the benchmark corpus differs from the expected "
                 "result."
@@ -289,84 +402,15 @@ def run_timing(scratch: Path, cwd: Path, corpus: str) -> dict[str, Any]:
 
 
 def judge(cwd: Path) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="wordfreq-judge-") as tmp:
-        scratch = Path(tmp)
-        failed = run_gate(scratch, cwd)
-        if failed is not None:
-            return failed
-        corpus = build_corpus()
-        result = run_timing(scratch, cwd, corpus)
-        if result["valid"]:
-            result["metrics"]["corpus_words"] = len(WORD_RE.findall(corpus.lower()))
-            result["metrics"]["correctness_cases"] = len(gate_cases())
-        return result
-
-
-# ---------------------------------------------------------------------------------------------
-# children: run inside the candidate subprocess
-# ---------------------------------------------------------------------------------------------
-
-
-def _frames(exc: BaseException, root: str) -> str:
-    """Where in the candidate's own files an exception came from (judge frames are hidden)."""
-    where = [
-        f"{os.path.relpath(f.filename, root)}:{f.lineno} in {f.name}"
-        for f in traceback.extract_tb(exc.__traceback__)
-        if f.filename.startswith(root)
-    ]
-    return f" at {where[-1]}" if where else ""
-
-
-def _load_candidate(out: Any, root: str) -> Any:
-    try:
-        import wordfreq  # the candidate
-
-        return wordfreq.top_words
-    except Exception as exc:
-        out.write(json.dumps({"fatal": f"{type(exc).__name__}{_frames(exc, root)}"}) + "\n")
-        out.flush()
-        return None
-
-
-def _call(fn: Any, text: str, k: int, root: str) -> tuple[dict[str, Any], float]:
-    started = _perf_counter()
-    try:
-        result = fn(text, k)
-        seconds = _perf_counter() - started
-        json.dumps(result)
-    except Exception as exc:
-        return {"error": f"raised {type(exc).__name__}{_frames(exc, root)}"}, 0.0
-    return {"result": result}, seconds
-
-
-def child_gate(cases_path: str, out_path: str) -> int:
-    root = os.getcwd()
-    sys.path.insert(0, root)
-    sys.stdout = sys.stderr  # stray prints must not reach the results channel
-    with open(out_path, "w", encoding="utf-8") as out:
-        fn = _load_candidate(out, root)
-        if fn is None:
-            return 1
-        for i, (_kind, text, k) in enumerate(json.loads(Path(cases_path).read_text())):
-            rec, _seconds = _call(fn, text, k, root)
-            out.write(json.dumps({"i": i, **rec}) + "\n")
-            out.flush()
-    return 0
-
-
-def child_time(corpus_path: str, k: str, out_path: str) -> int:
-    root = os.getcwd()
-    sys.path.insert(0, root)
-    sys.stdout = sys.stderr
-    with open(out_path, "w", encoding="utf-8") as out:
-        fn = _load_candidate(out, root)
-        if fn is None:
-            return 1
-        text = Path(corpus_path).read_text(encoding="utf-8")
-        gc.collect()
-        rec, seconds = _call(fn, text, int(k), root)
-        out.write(json.dumps({**rec, "seconds": seconds}) + "\n")
-    return 0
+    failed = run_gate(cwd)
+    if failed is not None:
+        return failed
+    corpora = timing_corpora()
+    result = run_timing(cwd, corpora)
+    if result["valid"]:
+        result["metrics"]["corpus_words"] = len(WORD_RE.findall(corpora[0].lower()))
+        result["metrics"]["correctness_cases"] = len(gate_cases())
+    return result
 
 
 def main() -> None:
@@ -376,10 +420,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--gate":
-        sys.exit(child_gate(sys.argv[2], sys.argv[3]))
-    if len(sys.argv) == 5 and sys.argv[1] == "--time":
-        sys.exit(child_time(sys.argv[2], sys.argv[3], sys.argv[4]))
     try:
         main()
     except Exception:  # the judge itself broke: lethe retries and does not charge the candidate

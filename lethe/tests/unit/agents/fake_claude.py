@@ -4,7 +4,8 @@ conftest.py copies this file into tmp_path behind a `#!<sys.executable>` shebang
 `ClaudeCodeOptions.executable` at it, so the tests exercise a real subprocess without ever
 starting the real CLI (no network, no credentials). It is not a test module.
 
-  FAKE_CLAUDE_RECORD         directory to record into: argv.json, cwd.txt, stdin.bin, child.pid
+  FAKE_CLAUDE_RECORD         directory to record into: argv.json, cwd.txt, env.json, stdin.bin,
+                             child.pid
   FAKE_CLAUDE_STREAM         file whose bytes are written to stdout (a recorded stream)
   FAKE_CLAUDE_STRIP_NEWLINE  "1": drop the stream's final newline (a line cut off mid-write)
   FAKE_CLAUDE_BIG_LINE       N: write one extra JSON line of about N bytes before the stream
@@ -41,6 +42,7 @@ def main() -> int:
     record = Path(env["FAKE_CLAUDE_RECORD"]) if env.get("FAKE_CLAUDE_RECORD") else None
     _record(record, "argv.json", json.dumps(sys.argv[1:]).encode("utf-8"))
     _record(record, "cwd.txt", os.getcwd().encode("utf-8"))
+    _record(record, "env.json", json.dumps(sorted(os.environ)).encode("utf-8"))  # names only
 
     if env.get("FAKE_CLAUDE_SKIP_STDIN") != "1":
         _record(record, "stdin.bin", sys.stdin.buffer.read())

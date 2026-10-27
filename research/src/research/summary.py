@@ -5,8 +5,8 @@ Definitions used throughout the analysis:
 - seed score: the judge score of candidate c0000 (agent "seed"), None if it was invalid.
 - final best: the best valid score of any candidate, seed included, under the run's direction.
   It is also defined for runs that have not finished: it is then the best so far.
-- finished: the run ended by itself (`run_finished` with a reason that is not an interruption or
-  a give-up after repeated errors, see `research.runs`). `finish_reason` keeps the raw reason.
+- finished: the run ended by itself (`run_finished` whose status is "completed" and whose reason
+  is not an abnormal one, see `research.runs`). `finish_reason` keeps the raw reason.
 - spend: cumulative `cost_usd` over every turn, errors included (a failed turn still costs).
 - proposal: a turn with status "candidate" or "empty"; "error" turns are not proposals.
 - round: the stretch between team forgets (`EpochStarted(scope="team")`). A round's seed score is
@@ -43,7 +43,7 @@ from lethe.domain.events import (
 )
 from lethe.domain.types import Direction, is_better
 from lethe.store import read_events
-from research.runs import EVENTS_FILE, discover_runs, reason_is_complete
+from research.runs import EVENTS_FILE, discover_runs, ending_is_complete
 
 __all__ = [
     "PROPOSAL_STATUSES",
@@ -133,6 +133,7 @@ class _Fold:
         self.team_forgets = 0
         self.agent_resets = 0
         self.finish_reason: str | None = None
+        self.finish_status = "completed"
         self.turn_spend: dict[str, float] = {}  # candidate -> spend at the end of its turn
         self.scored: list[tuple[float, float]] = []  # (spend credited, score) per valid candidate
         self.round_bests: list[float | None] = []  # best so far at the end of each closed round
@@ -158,7 +159,7 @@ class _Fold:
         elif isinstance(event, EpochStarted):
             self._epoch(event)
         elif isinstance(event, RunFinished):
-            self.finish_reason = event.reason
+            self.finish_reason, self.finish_status = event.reason, event.status
 
     def _judged(self, event: JudgeFinished) -> None:
         score = _valid_score(event)
@@ -220,7 +221,8 @@ class _Fold:
             rep=rep,
             run_dir=run_dir,
             direction=self.direction,
-            finished=self.finish_reason is not None and reason_is_complete(self.finish_reason),
+            finished=self.finish_reason is not None
+            and ending_is_complete(self.finish_status, self.finish_reason),
             finish_reason=self.finish_reason,
             started_at=self.started_at,
             seed_score=self.seed_score,

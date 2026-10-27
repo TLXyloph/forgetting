@@ -5,9 +5,12 @@
 #
 # The paper gave each run $20 on AHC014 ($40 on VLIW) and used DeepSeek V4.1 Flash, a cheap model
 # that fits hundreds of turns into that budget. A subscription's rate windows allow far fewer
-# turns, so each run here is capped at 160 proposals (agent turns across the whole team) instead
-# of a dollar amount: `usd = 0` removes the dollar cap, and `primary = "proposals"` makes the
-# forget fractions (25/50/75%) count proposals. Absolute scores are therefore not comparable
+# turns, so each run here is capped at 160 proposals (agent turns across the whole team)
+# instead of a dollar amount, and `primary = "proposals"` makes the forget fractions (25/50/75%)
+# count proposals. `usd = 200` is a safety cap, not the budget: it is meant to sit above the
+# API-equivalent cost of 160 turns, and it bounds the bill if a run ever charges an API key or a
+# cloud account (agent.allow_api_billing, or isolation "bare"). If a run ends on the dollar cap
+# (see `lethe report`), raise it rather than compare that run. Absolute scores are not comparable
 # with the paper's; the matched-budget comparison between the arms is what this reproduces.
 #
 #   python -m research.matrix research/config/experiments/paper-ahc014.toml
@@ -18,7 +21,7 @@ task = "../../tasks/ahc014/lethe.toml"
 replicates = 3
 
 [overrides]
-budget = { proposals = 160, primary = "proposals", usd = 0 }
+budget = { proposals = 160, primary = "proposals", usd = 200 }
 
 [[arms]]
 name = "solo"

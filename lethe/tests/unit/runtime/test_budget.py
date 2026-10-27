@@ -70,3 +70,21 @@ def test_pacer_wait_is_immediate_when_not_paused():
     pacer = Pacer(pause_at=0.95, clock=t.clock, sleep=t.sleep)
     asyncio.run(pacer.wait())
     assert t.sleeps == []
+
+
+def test_a_full_five_hour_window_pauses_until_that_window_resets():
+    t = FakeTime()
+    pacer = Pacer(pause_at=0.95, clock=t.clock, sleep=t.sleep)
+    # the event's own resetsAt belongs to the 7-day window it names: not the one to wait for
+    info = RateLimitInfo(
+        "allowed_warning", 0.97, 0.5, resets_at=900000.0, five_hour_resets_at=4000.0
+    )
+    assert pacer.observe(info) == 4000.0 + Pacer.GRACE_S
+
+
+def test_without_a_five_hour_reset_the_events_reset_is_the_fallback():
+    t = FakeTime()
+    pacer = Pacer(pause_at=0.95, clock=t.clock, sleep=t.sleep)
+    assert (
+        pacer.observe(RateLimitInfo("allowed_warning", 0.97, 0.5, 3000.0)) == 3000.0 + Pacer.GRACE_S
+    )

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from research import stats
+from research.analyze import build_report, render_report
 from research.summary import RunSummary
 from research.tables import (
     arm_names,
@@ -267,3 +268,17 @@ def test_table_2_keeps_arms_in_first_appearance_order(make_summary: Factory) -> 
         make_summary, "a-arm", [[1.0, 2.0]]
     )
     assert [r.arm for r in round_table(summaries)] == ["z-arm", "z-arm", "a-arm", "a-arm"]
+
+
+def test_table_2_shows_how_many_of_the_arms_runs_reached_each_round(make_summary: Factory) -> None:
+    """A trailing round only some replicates reached is visible as such (n of the arm's runs)."""
+    summaries = forgetting(
+        make_summary, "tf", [[100.0, 120.0, 130.0], [110.0, 150.0], [90.0, 95.0]]
+    )
+
+    rows = round_table(summaries)
+
+    assert [(r.round, r.n, r.runs) for r in rows] == [(1, 3, 3), (2, 3, 3), (3, 1, 3)]
+    text = render_report(build_report(summaries, experiment="x"))
+    table2 = text[text.index("Table 2") :].split("\n\n")[0]
+    assert "1/3" in table2 and "3/3" in table2

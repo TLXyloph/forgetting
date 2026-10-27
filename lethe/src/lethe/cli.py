@@ -7,7 +7,7 @@ import sys
 import tomllib
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from lethe.api import check_task, load_run, run_archive, run_filters, run_task
 from lethe.config import ConfigError, list_presets
@@ -109,6 +109,14 @@ def overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return overrides
 
 
+def _print_warning(text: str, file: TextIO) -> None:
+    """`warning: <first line>`, further lines indented under it."""
+    first, *rest = text.splitlines() or [""]
+    print(f"warning: {first}", file=file)
+    for line in rest:
+        print(f"  {line}", file=file)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     def progress(envelope, state):
         line = format_event(envelope, state)
@@ -123,6 +131,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             runs_dir=args.runs_dir,
             run_name=args.name,
             on_event=progress,
+            on_warning=lambda text: _print_warning(text, sys.stderr),
         )
     except KeyboardInterrupt:
         print("\ninterrupted; the partial run is kept in its run directory", file=sys.stderr)
@@ -149,7 +158,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         print(f"judge run {i}: {status} in {result.duration_s:.1f}s")
     print(f"claude: {report.claude_path or 'not found'} {report.claude_version or ''}".rstrip())
     for warning in report.warnings:
-        print(f"warning: {warning}")
+        _print_warning(warning, sys.stdout)
     return 0
 
 

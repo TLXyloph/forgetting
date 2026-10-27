@@ -24,6 +24,10 @@ from lethe.domain.types import Direction, is_better
 
 SEED_ID = "c0000"
 OK_STATUSES = ("candidate", "empty")
+# Error kinds after which the session survives: the next turn resumes the last OK session.
+# Anything else ("process", or no kind in logs written before kinds were logged) starts fresh.
+RESUMABLE_ERRORS = ("api", "timeout", "harness")
+MAX_RESUMED_ERRORS = 2  # consecutive transient errors after which a session is abandoned
 
 
 @dataclass
@@ -70,6 +74,7 @@ class TurnInfo:
     plateau_claim: bool
     duration_s: float
     spent_after: float  # cumulative run spend once this turn is counted
+    error_kind: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -217,6 +222,7 @@ class RunState:
                 plateau_claim=event.plateau_claim,
                 duration_s=event.duration_s,
                 spent_after=self.spent_usd,
+                error_kind=event.error_kind,
             )
         )
 
@@ -256,11 +262,20 @@ class RunState:
         return [t for t in self.turns if t.agent == agent and t.epoch == epoch]
 
     def current_session(self, agent: str) -> str | None:
-        """Session to continue: the last turn's session in this epoch, unless that turn errored."""
-        turns = self.epoch_turns(agent)
-        if not turns or not turns[-1].ok:
-            return None
-        return turns[-1].session_id
+        """Session to continue in this epoch: the last OK turn's session, unless a turn after it
+        failed with an error that does not survive (see RESUMABLE_ERRORS). None = start fresh.
+
+        Transient failures (an API error, a timeout, a harness-side failure) keep the session,
+        so a run without forgetting never forgets by accident; a process failure starts over,
+        and so do MAX_RESUMED_ERRORS consecutive transient failures (a poisoned session, e.g. a
+        history the API keeps rejecting, must not stall the agent until it is stopped).
+        """
+        for errors, turn in enumerate(reversed(self.epoch_turns(agent)), start=1):
+            if turn.ok:
+                return turn.session_id
+            if turn.error_kind not in RESUMABLE_ERRORS or errors >= MAX_RESUMED_ERRORS:
+                return None
+        return None
 
     def session_turn_list(self, agent: str) -> list[TurnInfo]:
         """Completed (non-error) turns of the agent's current session, oldest first."""

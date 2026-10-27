@@ -206,11 +206,12 @@ def test_concurrency_two_allows_exactly_two_at_once(tmp_path, make_runner, judge
 
 def test_one_runner_can_be_used_across_event_loops(tmp_path, make_runner, judge_tree):
     runner = make_runner(concurrency=1)
+    results = []
 
     for round_ in ("first", "second"):
 
         async def main(round_=round_):
-            await asyncio.gather(
+            return await asyncio.gather(
                 *(
                     runner.evaluate(
                         cand_id=f"{round_}{i}",
@@ -221,6 +222,6 @@ def test_one_runner_can_be_used_across_event_loops(tmp_path, make_runner, judge_
                 )
             )
 
-        asyncio.run(main())  # both calls contend for the single slot
+        results += asyncio.run(main())  # both calls contend for the single slot
 
-    assert len(list((tmp_path / "work").glob("*-1"))) == 4
+    assert [(r.score, r.cache_hit) for r in results] == [(1.0, False)] * 4

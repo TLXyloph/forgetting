@@ -119,7 +119,8 @@ class Archive:
         """Commit every regular file under `workdir` not matched by `exclude`.
 
         `index_name` names this call's private git index; use one distinct name per agent.
-        Names git cannot be handed safely (a line break in the path) and `.git` entries are skipped.
+        Names git cannot be handed safely (a line break in the path), names with a backslash (which
+        `safe_relpath` refuses, so they could never be checked out) and `.git` entries are skipped.
         """
         _check_name(index_name, "index_name")
         if parent_sha is not None:
@@ -224,7 +225,7 @@ class Archive:
                 stdin=stdin,
                 capture_output=True,
                 check=True,
-                env=_git_env(env),
+                env=git_env(env),
             )
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(_failure_message(args, exc.returncode, exc.stderr)) from exc
@@ -246,7 +247,7 @@ class Archive:
             prefix = "" if relative_dir == "." else relative_dir.replace(os.sep, "/") + "/"
             for name in sorted(filenames):
                 rel = prefix + name
-                if name == ".git" or "\n" in rel or "\r" in rel or self.exclude(rel):
+                if name == ".git" or _unsafe_name(rel) or self.exclude(rel):
                     continue
                 full = os.path.join(dirpath, name)
                 try:
@@ -337,7 +338,7 @@ class _BlobReader:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=_git_env(),
+            env=git_env(),
         )
         self._stderr = b""
         self._closed = False
@@ -396,12 +397,19 @@ class _BlobReader:
             proc.stderr.close()
 
 
-def _git_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+def git_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment for every git call lethe makes: no user or system config, a fixed
+    identity, and none of the variables that would point git at another repository."""
     env = {k: v for k, v in os.environ.items() if k not in _SCRUBBED_ENV}
     env.update(_FIXED_ENV)
     if extra:
         env.update(extra)
     return env
+
+
+def _unsafe_name(rel: str) -> bool:
+    """A path git cannot be handed safely (line breaks) or that is not a plain POSIX path."""
+    return "\n" in rel or "\r" in rel or "\\" in rel
 
 
 def _failure_message(args: tuple[str, ...], returncode: int, stderr: bytes) -> str:

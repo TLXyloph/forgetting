@@ -274,10 +274,12 @@ class RunBuilder:
             )
         )
 
-    def finish(self, reason: str = "budget") -> Path:
+    def finish(self, reason: str = "budget", status: str = "completed") -> Path:
         """RunFinished with the best candidate; returns the run directory."""
         best_id, best_score = self.best()
-        self.store.append(RunFinished(reason=reason, best_cand_id=best_id, best_score=best_score))
+        self.store.append(
+            RunFinished(reason=reason, best_cand_id=best_id, best_score=best_score, status=status)
+        )
         return self.run_dir
 
 

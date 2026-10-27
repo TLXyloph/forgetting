@@ -11,6 +11,7 @@ from research.runs import (
     RunLocation,
     arm_dir_for,
     discover_runs,
+    ending_is_complete,
     find_rep_dirs,
     finish_reason,
     is_run_complete,
@@ -120,6 +121,26 @@ def test_runs_that_ended_abnormally_are_not_complete(
     run_dir = finished_log(run_builder, tmp_path / "r", reason)
     assert is_run_complete(run_dir / EVENTS_FILE) is complete
     assert finish_reason(run_dir / EVENTS_FILE) == reason  # still reported either way
+
+
+@pytest.mark.parametrize(
+    ("status", "complete"),
+    [("completed", True), ("interrupted", False), ("crashed", False), ("stopped", False)],
+)
+def test_the_logged_status_decides_whether_a_run_ended_normally(
+    tmp_path: Path, run_builder: type, status: str, complete: bool
+) -> None:
+    run_dir = run_builder(tmp_path / "r").start(100.0).finish("budget exhausted", status=status)
+    assert is_run_complete(run_dir / EVENTS_FILE) is complete
+    assert ending_is_complete(status, "budget exhausted") is complete
+
+
+def test_logs_without_a_status_fall_back_to_the_reason(tmp_path: Path, run_builder: type) -> None:
+    # logs written before RunFinished had a status decode it as "completed"
+    run_dir = run_builder(tmp_path / "r").start(100.0).finish("interrupted")
+    assert is_run_complete(run_dir / EVENTS_FILE) is False
+    assert ending_is_complete("completed", "all agents stopped after repeated errors") is False
+    assert ending_is_complete("crashed", "crashed: RuntimeError: boom") is False
 
 
 def test_torn_final_line_means_the_run_did_not_finish(tmp_path: Path, run_builder: type) -> None:

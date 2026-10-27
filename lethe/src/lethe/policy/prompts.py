@@ -11,7 +11,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from lethe.domain.types import Direction
+from lethe.domain.types import Direction, format_score
+
+__all__ = [
+    "CONTINUE",
+    "INSTRUCTIONS",
+    "PeerStatus",
+    "continue_prompt",
+    "first_turn_prompt",
+    "format_score",
+    "status_block",
+    "task_md",
+]
 
 INSTRUCTIONS = """\
 `.context/` holds what was prepared for this turn: the candidate's feedback, its lineage, other \
@@ -41,12 +52,6 @@ class PeerStatus:
     branch: int
     best_id: str | None
     best_score: float | None
-
-
-def format_score(score: float | None) -> str:
-    if score is None:
-        return "n/a"
-    return f"{score:.10g}"
 
 
 def status_block(

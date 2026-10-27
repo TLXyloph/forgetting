@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from lethe.domain.types import CandidateCard, ContextBundle, PeerBranch
-from lethe.workspace.archive import Archive
+from lethe.domain.types import CandidateCard, ContextBundle, PeerBranch, format_score
+from lethe.workspace.archive import Archive, git_env
 from lethe.workspace.paths import UnsafePathError, safe_join
 
 CONTEXT_DIR = ".context"
@@ -34,6 +35,12 @@ class Materializer:
         .context/peers/branch<i>/<cand_id>.diff   diff of each pool card
         .context/peers/branch<i>/best/<path>      full judged files of the peer's best candidate
     Every written path is validated with `safe_join` (peer file names come from agent output).
+
+    Every workspace is also an empty git repository (`git init`, never committed to). Claude Code
+    shows an agent the branch, status and recent commits of the repository around its working
+    directory; this one stops that search at the workspace, so nothing from an enclosing
+    repository (such as the project the runs live in) reaches the agent. `render` never touches
+    `.git`, and snapshots never archive it.
     """
 
     def __init__(self, archive: Archive, ws_root: Path) -> None:
@@ -47,10 +54,14 @@ class Materializer:
         seed_sha: str,
         *,
         keep: Callable[[str], bool] | None = None,
+        base_sha: str | None = None,
     ) -> Path:
-        """Create `ws_root/<agent>/e<epoch>/` holding the seed's files (filtered by `keep`).
+        """Create `ws_root/<agent>/e<epoch>/` holding the seed's files, as an empty git repo.
 
-        Raises FileExistsError if that workspace already exists.
+        Without `base_sha`: every file of `seed_sha` (filtered by `keep`). With `base_sha` (a
+        clean start): the files of `base_sha` that are not judged plus the judged files of
+        `seed_sha` (`Archive.checkout_overlay`), so scratch files and edits to support files
+        are left behind. Raises FileExistsError if that workspace already exists.
         """
         if not _is_safe_name(agent):
             raise ValueError(f"invalid agent name {agent!r}: use [A-Za-z0-9_.-]+, not '.' or '..'")
@@ -59,7 +70,11 @@ class Materializer:
         path = self.ws_root / agent / f"e{epoch}"
         if path.is_symlink() or path.exists():
             raise FileExistsError(f"workspace already exists: {path}")
-        self.archive.checkout(seed_sha, path, keep=keep)
+        if base_sha is None:
+            self.archive.checkout(seed_sha, path, keep=keep)
+        else:
+            self.archive.checkout_overlay(base_sha, seed_sha, path)
+        _git_init(path)
         return path
 
     def render(self, workspace: Path, bundle: ContextBundle) -> None:
@@ -98,6 +113,15 @@ class Materializer:
 
 
 # --- filesystem helpers ------------------------------------------------------------------------
+
+
+def _git_init(path: Path) -> None:
+    """Make `path` an empty git repository (no user or system config; nothing is committed)."""
+    command = ["git", "-c", "init.defaultBranch=main", "init", "-q", str(path)]
+    done = subprocess.run(command, capture_output=True, env=git_env(), check=False)
+    if done.returncode != 0:
+        detail = done.stderr.decode("utf-8", errors="replace").strip() or "no output on stderr"
+        raise RuntimeError(f"git init {path} failed with exit code {done.returncode}: {detail}")
 
 
 def _is_safe_name(value: object) -> bool:
@@ -148,7 +172,7 @@ def _score_cell(card: CandidateCard) -> str:
         return "pending"
     if not card.valid or card.score is None:
         return "invalid"
-    return f"{card.score:g}"
+    return format_score(card.score)
 
 
 def _table(cards: Iterable[CandidateCard]) -> str:
@@ -165,7 +189,7 @@ def _feedback_md(bundle: ContextBundle) -> str:
     if card.valid is None:
         score = "Score: n/a (not judged yet)"
     elif card.valid and card.score is not None:
-        score = f"Score: {card.score:g} (valid)"
+        score = f"Score: {format_score(card.score)} (valid)"
     else:
         score = "Score: n/a (invalid)"
     feedback = bundle.feedback.strip("\n").rstrip() if bundle.feedback.strip() else "(none)"
@@ -192,8 +216,7 @@ def _pool_md(peer: PeerBranch, branch_dir: str) -> str:
     if peer.best is None:
         best = "Best: none yet"
     else:
-        score = "n/a" if peer.best.score is None else f"{peer.best.score:g}"
-        best = f"Best: `{_one_line(peer.best.cand_id)}` at {score}"
+        best = f"Best: `{_one_line(peer.best.cand_id)}` at {format_score(peer.best.score)}"
     footer = f"Diffs: `{CONTEXT_DIR}/{branch_dir}/<id>.diff`\n"
     if peer.best_files:
         footer += f"Best candidate files: `{CONTEXT_DIR}/{branch_dir}/best/`\n"

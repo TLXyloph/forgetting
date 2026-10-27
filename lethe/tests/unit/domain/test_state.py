@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from lethe.domain.events import (
     CandidateCommitted,
     EpochStarted,
@@ -48,9 +50,28 @@ def turn(
     cost=0.5,
     lines=4,
     claim=False,
+    error_kind=None,
 ):
     return TurnFinished(
-        agent, epoch, session, n, status, cid, cost, 10, 100, 0, 0, 0, 1, 1, lines, claim, 1.0
+        agent,
+        epoch,
+        session,
+        n,
+        status,
+        cid,
+        cost,
+        10,
+        100,
+        0,
+        0,
+        0,
+        1,
+        1,
+        lines,
+        claim,
+        1.0,
+        error="boom" if status == "error" else None,
+        error_kind=error_kind,
     )
 
 
@@ -160,3 +181,32 @@ def test_run_finished_recorded(feeder):
     started(feed)
     feed(RunFinished("budget", "c0000", 10.0))
     assert state.finished is not None and state.finished.reason == "budget"
+
+
+@pytest.mark.parametrize("kind", ["api", "timeout"])
+def test_transient_errors_resume_the_last_ok_session(feeder, kind):
+    state, feed = feeder
+    started(feed)
+    feed(turn(session="s1", n=1, lines=7))
+    feed(turn(session="s1", n=2, status="error", error_kind=kind, cost=0.1, lines=0))
+    assert state.current_session("a1") == "s1"
+    assert [t.lines_changed for t in state.session_turn_list("a1")] == [7]
+    assert state.turns[-1].error_kind == kind
+    # (two consecutive transient errors abandon the session: see test_state_sessions.py)
+
+
+def test_a_process_error_starts_a_fresh_session_that_later_errors_do_not_undo(feeder):
+    state, feed = feeder
+    started(feed)
+    feed(turn(session="s1", n=1))
+    feed(turn(session="s1", n=2, status="error", error_kind="process", lines=0))
+    assert state.current_session("a1") is None
+    feed(turn(session="s2", n=1, status="error", error_kind="timeout", lines=0))
+    assert state.current_session("a1") is None  # s1 was given up; s2 never completed a turn
+
+
+def test_a_transient_error_with_no_ok_turn_this_epoch_starts_fresh(feeder):
+    state, feed = feeder
+    started(feed)
+    feed(turn(session="s1", n=1, status="error", error_kind="timeout", lines=0))
+    assert state.current_session("a1") is None

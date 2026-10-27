@@ -11,21 +11,25 @@ import pytest
 SPAWNING_JUDGE = """
     import os, subprocess, sys, time
     child = subprocess.Popen(["sleep", "60"])
-    with open(os.path.join(os.environ["LETHE_OUT"], "child.pid"), "w") as handle:
+    with open(os.environ["PID_FILE"] + ".tmp", "w") as handle:
         handle.write(str(child.pid))
+    os.replace(os.environ["PID_FILE"] + ".tmp", os.environ["PID_FILE"])
     time.sleep(60)
 """
 
 
-def _child_pid(tree: Path) -> int:
-    return int((tree.parent / "out" / "child.pid").read_text())
+def _child_pid(pid_file: Path) -> int:
+    return int(pid_file.read_text())
 
 
 # --- timeouts -----------------------------------------------------------------------------------
 
 
-def test_timeout_kills_the_whole_process_group(make_runner, judge_tree, evaluate, wait_until_dead):
-    runner = make_runner(timeout_s=1.0)
+def test_timeout_kills_the_whole_process_group(
+    tmp_path, make_runner, judge_tree, evaluate, wait_until_dead
+):
+    pid_file = tmp_path / "child.pid"
+    runner = make_runner(timeout_s=1.0, env={"PID_FILE": str(pid_file)})
     materialize = judge_tree(SPAWNING_JUDGE)
 
     started = time.monotonic()
@@ -39,7 +43,7 @@ def test_timeout_kills_the_whole_process_group(make_runner, judge_tree, evaluate
     assert result.error == "judge timed out after 1s"
     assert 1.0 <= result.duration_s < 3.0
     (tree,) = materialize.trees
-    assert wait_until_dead(_child_pid(tree)), "the judge's child process survived the timeout"
+    assert wait_until_dead(_child_pid(pid_file)), "the judge's child process survived the timeout"
     assert not tree.exists()
 
 
@@ -61,23 +65,18 @@ def test_each_command_gets_its_own_timeout_budget(make_runner, judge_tree, py, e
 def test_build_timeout_kills_the_build_and_never_runs_the_judge(
     tmp_path, make_runner, judge_tree, py, evaluate, wait_until_dead
 ):
-    build = """
-        import os, subprocess, time
-        child = subprocess.Popen(["sleep", "60"])
-        with open(os.path.join(os.environ["LETHE_OUT"], "child.pid"), "w") as handle:
-            handle.write(str(child.pid))
-        time.sleep(60)
-    """
     source = "import os; open(os.environ['RAN'], 'w').write('ran'); print(1)"
-    runner = make_runner(build=py("build.py"), timeout_s=1.0, env={"RAN": str(tmp_path / "ran")})
-    materialize = judge_tree(source, **{"build.py": build})
+    pid_file = tmp_path / "child.pid"
+    env = {"RAN": str(tmp_path / "ran"), "PID_FILE": str(pid_file)}
+    runner = make_runner(build=py("build.py"), timeout_s=1.0, env=env)
+    materialize = judge_tree(source, **{"build.py": SPAWNING_JUDGE})
 
     result = evaluate(runner, materialize)
 
     assert result.valid is False
     assert result.error == "judge timed out after 1s"
     assert not (tmp_path / "ran").exists()
-    assert wait_until_dead(_child_pid(materialize.trees[0]))
+    assert wait_until_dead(_child_pid(pid_file))
 
 
 def test_timed_out_results_are_not_cached(tmp_path, make_runner, judge_tree, evaluate):
@@ -131,14 +130,14 @@ def _wait_for_file(path: Path, timeout: float = 10.0) -> None:
 def test_cancelling_an_evaluation_kills_the_process_group_and_frees_the_slot(
     tmp_path, make_runner, judge_tree, wait_until_dead
 ):
-    runner = make_runner(concurrency=1)
+    pid_file = tmp_path / "child.pid"
+    runner = make_runner(concurrency=1, env={"PID_FILE": str(pid_file)})
     materialize = judge_tree(SPAWNING_JUDGE)
 
     async def main():
         task = asyncio.create_task(
             runner.evaluate(cand_id="c0001", judged_key="slow", materialize=materialize)
         )
-        pid_file = tmp_path / "work" / "c0001-1" / "out" / "child.pid"
         while not pid_file.exists():
             await asyncio.sleep(0.02)
         task.cancel()
@@ -158,8 +157,8 @@ def test_cancelling_an_evaluation_kills_the_process_group_and_frees_the_slot(
 
     assert after.score == 6.0
     (tree,) = materialize.trees
-    assert wait_until_dead(_child_pid(tree)), "the judge's child process survived cancellation"
-    assert not tree.exists()
+    assert wait_until_dead(_child_pid(pid_file)), "the judge's child survived cancellation"
+    assert not tree.parent.exists()
 
 
 def test_when_the_evaluating_caller_is_cancelled_a_waiting_caller_takes_over(
@@ -279,6 +278,6 @@ def test_oversized_result_json_is_invalid_rather_than_read_whole(make_runner, ju
             handle.write('{"score": 1, "feedback": "' + "z" * (3 * 1024 * 1024) + '"}')
         print(1)
     """
-    result = evaluate(make_runner(), judge_tree(source))
+    result = evaluate(make_runner(output="file"), judge_tree(source))
     assert result.valid is False
     assert result.feedback.startswith("result.json is not valid JSON")

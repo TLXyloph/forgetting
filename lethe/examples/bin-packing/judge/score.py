@@ -5,7 +5,10 @@ cwd = the judge tree (the seed with the candidate's editable files overlaid).
 
   1. Build 24 fixed instances (3 item-size distributions x 8 sizes, 100-1000 items each).
   2. Run the candidate's `solve` on all of them in ONE subprocess with a total time limit
-     (30 s; BIN_PACKING_TIMEOUT_S overrides it, which the tests use).
+     (30 s; BIN_PACKING_TIMEOUT_S overrides it, which the tests use). The subprocess is
+     `python -s -B -c <runner>`: the runner is inline (the candidate never learns where this
+     file is), the instances come on stdin and the results go back on stdout (no paths), and
+     its environment holds no LETHE_* variables and no credentials.
   3. Validate every returned packing here, in the parent, and score it:
          score = 100 * mean(lower_bound / bins_used),  lower_bound = ceil(sum(sizes) / capacity)
 
@@ -31,7 +34,7 @@ import traceback
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 try:
     import resource
@@ -43,6 +46,46 @@ ITEM_COUNTS = (100, 150, 200, 300, 400, 500, 750, 1000)
 TRIPLET_COUNTS = (102, 150, 198, 300, 402, 501, 750, 999)  # multiples of 3
 DISTRIBUTIONS = ("uniform", "wide", "triplet")
 MAX_FILE_BYTES = 64 * 1024 * 1024
+# All the candidate inherits from the judge's environment (plus LC_*): enough to run Python.
+INHERITED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TEMP", "TMP")
+INHERITED_ENV += ("TZ", "SYSTEMROOT")
+
+# What the candidate's process runs (`python -s -B -c`): import `solver` from the judge tree, then
+# solve the instances read from stdin, one JSON result per line on the real stdout (the
+# candidate's own prints go to stderr).
+RUNNER = """
+import json, os, sys, time, traceback
+root = os.getcwd()
+sys.path.insert(0, root)
+results = sys.stdout
+sys.stdout = sys.stderr
+
+def where(exc):
+    frames = [f"{os.path.relpath(f.filename, root)}:{f.lineno} in {f.name}"
+              for f in traceback.extract_tb(exc.__traceback__) if f.filename.startswith(root)]
+    return f" ({frames[-1]})" if frames else ""
+
+def send(record):
+    results.write(json.dumps(record) + "\\n")
+    results.flush()
+
+try:
+    from solver import solve
+except Exception as exc:
+    send({"name": "<import>", "fatal": f"{type(exc).__name__}: {exc}{where(exc)}"})
+    sys.exit(1)
+for inst in json.loads(sys.stdin.read()):
+    started = time.perf_counter()
+    try:
+        bins = solve(list(inst["sizes"]), inst["capacity"])
+        rec = {"name": inst["name"], "bins": bins, "seconds": time.perf_counter() - started}
+        line = json.dumps(rec)
+    except Exception as exc:
+        line = json.dumps({"name": inst["name"],
+                           "error": f"raised {type(exc).__name__}: {exc}{where(exc)}"})
+    results.write(line + "\\n")
+    results.flush()
+"""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -132,18 +175,17 @@ def _kill_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
 
 
-def _candidate_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("LETHE_")}
-    env.update(PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1")
+def candidate_env() -> dict[str, str]:
+    """Just enough to run Python: no LETHE_* variables, no credentials."""
+    env = {k: v for k, v in os.environ.items() if k in INHERITED_ENV or k.startswith("LC_")}
+    env["PYTHONHASHSEED"] = "0"  # identical candidates must score identically
     return env
 
 
-def _tail(path: Path, limit: int = 700) -> str:
-    try:
-        data = path.read_bytes()[-limit:]
-    except OSError:
-        return ""
-    return data.decode("utf-8", errors="replace").strip()
+def _tail(stream: IO[bytes], limit: int = 700) -> str:
+    stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, stream.tell() - limit))
+    return stream.read().decode("utf-8", errors="replace").strip()
 
 
 def _describe_exit(code: int) -> str:
@@ -156,22 +198,27 @@ def _describe_exit(code: int) -> str:
 
 
 def run_candidate(
-    instances_path: Path, results_path: Path, stderr_path: Path, cwd: Path, timeout: float
-) -> tuple[int, bool]:
-    """Run the driver child on the candidate; returns (exit code, timed_out).
+    instances: bytes, cwd: Path, timeout: float
+) -> tuple[int, bool, dict[str, dict[str, Any]], str]:
+    """Run the runner on the candidate with `instances` on stdin.
 
-    `-P` keeps the cwd and the script directory off sys.path (the driver adds the candidate's
-    tree itself); unlike `-I` it leaves PYTHONHASHSEED effective.
+    Returns (exit code, timed_out, results by instance name, stderr tail). Its stdin, stdout and
+    stderr are anonymous temporary files: no path to them exists, and no pipe can be held open.
     """
-    argv = [sys.executable, "-P", str(Path(__file__).resolve()), "--child"]
-    argv += [str(instances_path), str(results_path)]
-    with open(stderr_path, "wb") as stderr:
+    argv = [sys.executable, "-s", "-B", "-c", RUNNER]
+    with (
+        tempfile.TemporaryFile() as stdin,
+        tempfile.TemporaryFile() as stdout,
+        tempfile.TemporaryFile() as stderr,
+    ):
+        stdin.write(instances)
+        stdin.seek(0)
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=_candidate_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            env=candidate_env(),
+            stdin=stdin,
+            stdout=stdout,
             stderr=stderr,
             start_new_session=True,
             preexec_fn=functools.partial(_limits, max(60, int(timeout * 8))),
@@ -184,15 +231,13 @@ def run_candidate(
         finally:
             _kill_group(proc.pid)
         proc.wait()
-    return proc.returncode, timed_out
+        stdout.seek(0)
+        results = read_results(stdout.read(MAX_FILE_BYTES).decode("utf-8", errors="replace"))
+        return proc.returncode, timed_out, results, _tail(stderr)
 
 
-def read_results(path: Path) -> dict[str, dict[str, Any]]:
+def read_results(text: str) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
     for line in text.splitlines():
         try:
             rec = json.loads(line)
@@ -306,93 +351,34 @@ def evaluate(instances: list[Instance], results: dict[str, dict[str, Any]]) -> d
 
 def judge(cwd: Path, timeout: float) -> dict[str, Any]:
     instances = build_instances()
-    with tempfile.TemporaryDirectory(prefix="binpack-judge-") as tmp:
-        scratch = Path(tmp)
-        instances_path = scratch / "instances.json"
-        results_path = scratch / "results.jsonl"
-        stderr_path = scratch / "stderr.txt"
-        instances_path.write_text(
-            json.dumps(
-                [{"name": i.name, "sizes": i.sizes, "capacity": i.capacity} for i in instances]
-            )
+    payload = json.dumps(
+        [{"name": i.name, "sizes": i.sizes, "capacity": i.capacity} for i in instances]
+    ).encode("utf-8")
+    started = time.perf_counter()
+    code, timed_out, results, stderr_tail = run_candidate(payload, cwd, timeout)
+    elapsed = time.perf_counter() - started
+    done = [i for i in instances if i.name in results]
+    stuck = next((i.name for i in instances if i.name not in results), None)
+    if timed_out:
+        return invalid(
+            f"Timed out after {timeout:g} s in total: {len(done)} of {len(instances)} "
+            f"instances finished; it was still working on {stuck}.",
+            finished=len(done),
         )
-        started = time.perf_counter()
-        code, timed_out = run_candidate(instances_path, results_path, stderr_path, cwd, timeout)
-        elapsed = time.perf_counter() - started
-        results = read_results(results_path)
-        done = [i for i in instances if i.name in results]
-        stuck = next((i.name for i in instances if i.name not in results), None)
-        if timed_out:
-            return invalid(
-                f"Timed out after {timeout:g} s in total: {len(done)} of {len(instances)} "
-                f"instances finished; it was still working on {stuck}.",
-                finished=len(done),
-            )
-        fatal = next((r for r in results.values() if "fatal" in r), None)
-        if fatal is not None:
-            return invalid(f"The candidate could not be loaded: {fatal['fatal']}")
-        if stuck is not None and not any("error" in r for r in results.values()):
-            detail = _tail(stderr_path)
-            return invalid(
-                f"The candidate process {_describe_exit(code)} while solving {stuck} "
-                f"({len(done)} of {len(instances)} instances finished)."
-                + (f" stderr tail: {detail}" if detail else ""),
-                finished=len(done),
-            )
-        result = evaluate(instances, results)
-        if result["valid"]:
-            result["metrics"]["wall_seconds"] = round(elapsed, 3)
-        return result
-
-
-# ---------------------------------------------------------------------------------------------
-# child: runs inside the candidate subprocess
-# ---------------------------------------------------------------------------------------------
-
-
-def _frames(exc: BaseException, root: str) -> str:
-    """Where in the candidate's own files the exception came from (judge frames are hidden)."""
-    where = [
-        f"{os.path.relpath(f.filename, root)}:{f.lineno} in {f.name}"
-        for f in traceback.extract_tb(exc.__traceback__)
-        if f.filename.startswith(root)
-    ]
-    return f" ({where[-1]})" if where else ""
-
-
-def child_main(instances_path: str, results_path: str) -> int:
-    root = os.getcwd()
-    sys.path.insert(0, root)
-    sys.stdout = sys.stderr  # stray prints must not reach the results channel
-    with open(results_path, "w", encoding="utf-8") as results:
-
-        def write(rec: dict[str, Any]) -> None:
-            results.write(json.dumps(rec) + "\n")
-            results.flush()
-
-        try:
-            import solver  # the candidate
-
-            solve = solver.solve
-        except Exception as exc:
-            write({"name": "<import>", "fatal": f"{type(exc).__name__}: {exc}{_frames(exc, root)}"})
-            return 1
-        for inst in json.loads(Path(instances_path).read_text()):
-            started = time.perf_counter()
-            try:
-                bins = solve(list(inst["sizes"]), inst["capacity"])
-                seconds = time.perf_counter() - started
-                rec = {"name": inst["name"], "bins": bins, "seconds": seconds}
-                line = json.dumps(rec)
-            except Exception as exc:
-                rec = {
-                    "name": inst["name"],
-                    "error": f"raised {type(exc).__name__}: {exc}{_frames(exc, root)}",
-                }
-                line = json.dumps(rec)
-            results.write(line + "\n")
-            results.flush()
-    return 0
+    fatal = next((r for r in results.values() if "fatal" in r), None)
+    if fatal is not None:
+        return invalid(f"The candidate could not be loaded: {fatal['fatal']}")
+    if stuck is not None and not any("error" in r for r in results.values()):
+        return invalid(
+            f"The candidate process {_describe_exit(code)} while solving {stuck} "
+            f"({len(done)} of {len(instances)} instances finished)."
+            + (f" stderr tail: {stderr_tail}" if stderr_tail else ""),
+            finished=len(done),
+        )
+    result = evaluate(instances, results)
+    if result["valid"]:
+        result["metrics"]["wall_seconds"] = round(elapsed, 3)
+    return result
 
 
 def main() -> None:
@@ -403,8 +389,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--child":
-        sys.exit(child_main(sys.argv[2], sys.argv[3]))
     try:
         main()
     except Exception:  # the judge itself broke: lethe retries and does not charge the candidate

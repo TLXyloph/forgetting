@@ -15,6 +15,7 @@ from lethe.policy.triggers import (
     BudgetFractions,
     Plateau,
     Stalled,
+    improved_since,
     trigger_from_dict,
 )
 
@@ -182,3 +183,12 @@ def test_trigger_from_dict_builds_and_validates():
         trigger_from_dict({"type": "plateau", "windw": 3})
     with pytest.raises(ValueError, match="fractions"):
         trigger_from_dict({"type": "budget_fractions", "fractions": [1.5]})
+
+
+def test_improved_since_measures_every_gain_from_the_window_start(feeder):
+    run = Run(feeder)  # the seed scores 100
+    window_start = run.state.last_seq
+    run.turn("a1", score=100.6)
+    run.turn("a1", score=101.2)  # +0.6% per step, but +1.2% over the window
+    assert improved_since(run.state, window_start, 0.01) is True
+    assert improved_since(run.state, window_start, 0.02) is False

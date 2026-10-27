@@ -2,20 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from itertools import count
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fakes import (  # noqa: E402
-    FakeArchive,
-    FakeBackend,
-    FakeJudge,
-    FakeMaterializer,
-    FakeStore,
-    Reply,
-    make_config,
-)
+from fakes import FakeJudge, FakeTime, Reply, build  # noqa: E402
 
 from lethe.domain.events import (  # noqa: E402
     CandidateCommitted,
@@ -29,41 +20,6 @@ from lethe.domain.events import (  # noqa: E402
 from lethe.domain.types import RateLimitInfo  # noqa: E402
 from lethe.runtime.budget import Pacer  # noqa: E402
 from lethe.runtime.orchestrator import Orchestrator  # noqa: E402
-
-
-class FakeTime:
-    def __init__(self):
-        self.now = 1000.0
-
-    def clock(self):
-        return self.now
-
-    async def sleep(self, seconds):
-        self.now += seconds
-        await asyncio.sleep(0)
-
-
-def build(tmp_path, script, *, pacer=None, events=None, **overrides):
-    config = make_config(tmp_path, **overrides)
-    archive = FakeArchive()
-    materializer = FakeMaterializer(archive, tmp_path / "ws")
-    judge, store = FakeJudge(), FakeStore()
-    backend = FakeBackend(script)
-    counter = count(1)
-    orch = Orchestrator(
-        config,
-        run_id="run-1",
-        run_dir=tmp_path / "run",
-        archive=archive,
-        materializer=materializer,
-        judge=judge,
-        backend=backend,
-        store=store,
-        new_session_id=lambda: f"sess-{next(counter)}",
-        pacer=pacer,
-        on_event=(lambda env, state: events.append(env.event.kind)) if events is not None else None,
-    )
-    return orch, store, backend, materializer, judge
 
 
 def climbing(agent, index, prompt, session):
@@ -135,7 +91,7 @@ def test_team_forget_starts_fresh_epochs_from_the_best(tmp_path):
     epoch = team_epochs[0]
     assert set(epoch.seeds.values()) == {_best_at_forget(store)}
     assert epoch.epochs == {"a1": 2, "a2": 2}
-    assert [(a, e) for a, e, _, _ in materializer.prepared] == [
+    assert [(a, e) for a, e, *_ in materializer.prepared] == [
         ("a1", 1),
         ("a2", 1),
         ("a1", 2),
@@ -205,12 +161,29 @@ def test_repeated_errors_stop_the_agent(tmp_path):
     assert state.proposals == 0
 
 
-def test_clean_forget_keeps_only_judged_and_seed_files(tmp_path):
-    overrides = {**SOLO, "forget": {"carry_scratch": False}}
-    orch, _, _, materializer, _ = build(tmp_path, climbing, **overrides)
+def test_clean_forget_restarts_from_the_original_seed_overlaid_with_the_best(tmp_path):
+    overrides = {
+        "team": {"agents": 1, "peers": "none"},
+        "forget": {
+            "carry_scratch": False,
+            "when": [{"type": "budget_fractions", "fractions": [0.5]}],
+        },
+        "budget": {"usd": 0, "proposals": 4, "primary": "proposals"},
+    }
+    orch, store, _, materializer, _ = build(tmp_path, climbing, **overrides)
+    state = asyncio.run(orch.run())
+    seed_sha = state.candidates["c0000"].sha
+    assert [(e, base) for _, e, _, _, base in materializer.prepared] == [
+        (1, seed_sha),
+        (2, seed_sha),
+    ]
+    assert [e.scope for e in store.of(EpochStarted)] == ["start", "team"]
+
+
+def test_carrying_scratch_copies_the_best_candidate_whole(tmp_path):
+    orch, _, _, materializer, _ = build(tmp_path, climbing, **SOLO)
     asyncio.run(orch.run())
-    keep = materializer.prepared[0][3]
-    assert keep("solver.txt") and keep("README.txt") and not keep("notes.md")
+    assert [base for *_, base in materializer.prepared] == [None]
 
 
 def test_usd_budget_is_metered_from_turn_costs(tmp_path):

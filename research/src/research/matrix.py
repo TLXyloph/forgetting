@@ -34,9 +34,9 @@ from research.experiment import (
 )
 from research.runs import (
     EVENTS_FILE,
-    finish_reason,
+    ending_is_complete,
+    finish_event,
     is_run_complete,
-    reason_is_complete,
     rep_name,
     run_dir_for,
 )
@@ -129,11 +129,11 @@ def execute_run(
         return failed(f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
     if not events.exists():
         return failed(f"runner returned but wrote no {EVENTS_FILE}")
-    reason = finish_reason(events)
-    if reason is None:
+    finished = finish_event(events)
+    if finished is None:
         return failed("runner returned but the log has no run_finished event")
-    if not reason_is_complete(reason):
-        return failed(f"run ended early: {reason}")
+    if not ending_is_complete(finished.status, finished.reason):
+        return failed(f"run ended early ({finished.status}): {finished.reason}")
     log.info("%s: completed", label)
     return RunRecord(arm.name, rep, run_dir, "completed")
 

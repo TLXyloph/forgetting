@@ -68,9 +68,9 @@ def test_table_2_csv_contents(experiment: Path, tmp_path: Path) -> None:
 
     rows = read_csv(tmp_path / "table2.csv")
 
-    assert [(r["arm"], r["round"], r["n"]) for r in rows] == [
-        ("team-forget", "1", "3"),
-        ("team-forget", "2", "3"),
+    assert [(r["arm"], r["round"], r["n"], r["runs"]) for r in rows] == [
+        ("team-forget", "1", "3", "3"),
+        ("team-forget", "2", "3", "3"),
     ]
     assert float(rows[0]["mean_best"]) == pytest.approx(125.0)  # half-way points 125, 130, 120
 

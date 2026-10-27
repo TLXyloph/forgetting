@@ -182,20 +182,19 @@ def test_feedback_md_for_a_candidate_not_judged_yet_has_no_metrics_section(rende
     )
 
 
-def test_feedback_md_uses_compact_score_formatting(render):
-    assert (
-        "Score: 3 (valid)"
-        in (
-            render(bundle(current=card("c1", score=3.0, valid=True))) / ".context/feedback.md"
-        ).read_text()
-    )
-    assert (
-        "Score: 0.123457 (valid)"
-        in (
-            render(bundle(current=card("c1", score=0.123456789, valid=True)))
-            / ".context/feedback.md"
-        ).read_text()
-    )
+@pytest.mark.parametrize(
+    ("score", "shown"),
+    [(3.0, "3"), (0.123456789, "0.123456789"), (1234567.0, "1234567"), (951931.25, "951931.25")],
+)
+def test_scores_use_the_prompts_compact_formatting_everywhere(render, score, shown):
+    """The same formatter as the prompts: large scores never collapse to `1.23457e+06`."""
+    mine = card("c1", score=score, valid=True)
+    peer = PeerBranch(branch=2, best=mine, best_files={}, pool=(mine,))
+    ws = render(bundle(current=mine, lineage=(mine,), peers=(peer,)))
+    assert f"Score: {shown} (valid)" in (ws / ".context/feedback.md").read_text()
+    assert f"| c1 | c0000 | {shown} | 0 |" in (ws / ".context/lineage.md").read_text()
+    pool = (ws / ".context/peers/branch2/pool.md").read_text()
+    assert f"Best: `c1` at {shown}" in pool and f"| c1 | c0000 | {shown} | 0 |" in pool
 
 
 def test_feedback_md_keeps_each_metric_on_one_line(render):

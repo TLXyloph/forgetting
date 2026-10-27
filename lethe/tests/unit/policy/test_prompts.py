@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from lethe.domain import types
 from lethe.policy.prompts import (
     PeerStatus,
     continue_prompt,
@@ -14,6 +15,7 @@ def test_format_score_is_compact_and_handles_none():
     assert format_score(1103000.0) == "1103000"
     assert format_score(0.961) == "0.961"
     assert format_score(None) == "n/a"
+    assert format_score is types.format_score  # one formatter for prompts and .context/
 
 
 def test_status_block_matches_paper_shape_for_a_team():

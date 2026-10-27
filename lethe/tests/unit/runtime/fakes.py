@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from itertools import count
 from pathlib import Path
 
 from lethe.config import RunConfig, load_config
 from lethe.domain.events import Envelope, Event
 from lethe.domain.types import JudgeResult, RateLimitInfo, ToolCall, TurnResult, Usage
+from lethe.runtime.orchestrator import Orchestrator
 from lethe.workspace.archive import Snapshot
 
 FILE = "solver.txt"
@@ -63,16 +66,21 @@ class FakeArchive:
 class FakeMaterializer:
     def __init__(self, archive: FakeArchive, root: Path):
         self.archive, self.root = archive, root
-        self.prepared: list[tuple[str, int, str, Callable | None]] = []
+        # (agent, epoch, seed_sha, keep, base_sha) per prepared workspace
+        self.prepared: list[tuple[str, int, str, Callable | None, str | None]] = []
         self.rendered: list = []
 
-    def prepare_epoch(self, agent, epoch, seed_sha, *, keep=None):
+    def prepare_epoch(self, agent, epoch, seed_sha, *, keep=None, base_sha=None):
         ws = self.root / agent / f"e{epoch}"
         ws.mkdir(parents=True)
-        for name, text in self.archive.trees[seed_sha].items():
+        files = dict(self.archive.trees[seed_sha])
+        if base_sha is not None:  # overlay: the base's other files plus the seed's judged file
+            files = {n: t for n, t in self.archive.trees[base_sha].items() if n != FILE}
+            files[FILE] = self.archive.trees[seed_sha][FILE]
+        for name, text in files.items():
             if keep is None or keep(name):
                 (ws / name).write_text(text)
-        self.prepared.append((agent, epoch, seed_sha, keep))
+        self.prepared.append((agent, epoch, seed_sha, keep, base_sha))
         return ws
 
     def render(self, workspace, bundle):
@@ -108,6 +116,8 @@ class Reply:
     cost: float = 0.1
     error_kind: str | None = None
     rate_limit: RateLimitInfo | None = None
+    error: str = "boom"
+    delay: float = 0.0  # real seconds the turn takes
 
 
 @dataclass
@@ -120,6 +130,8 @@ class FakeBackend:
     async def run_turn(self, *, agent, workspace, prompt, session, transcript_path):
         index = sum(1 for c in self.calls if c["agent"] == agent)
         reply = self.script(agent, index, prompt, session)
+        if reply.delay:
+            await asyncio.sleep(reply.delay)
         self.calls.append(
             {
                 "agent": agent,
@@ -140,7 +152,7 @@ class FakeBackend:
             tool_calls=(ToolCall("Read", "solver.txt"), ToolCall("Edit", "solver.txt")),
             duration_s=0.01,
             error_kind=reply.error_kind,  # type: ignore[arg-type]
-            error="boom" if reply.error_kind else None,
+            error=reply.error if reply.error_kind else None,
             rate_limit=reply.rate_limit,
         )
 
@@ -159,3 +171,42 @@ class FakeStore:
 
     def of(self, cls) -> list:
         return [e for e in self.events if isinstance(e, cls)]
+
+
+class FakeTime:
+    """A clock for the Pacer: `sleep` advances it, after a real pause of `tick` seconds."""
+
+    def __init__(self, tick: float = 0.0):
+        self.now = 1000.0
+        self.tick = tick
+
+    def clock(self):
+        return self.now
+
+    async def sleep(self, seconds):
+        self.now += seconds
+        await asyncio.sleep(self.tick)
+
+
+def build(tmp_path, script, *, pacer=None, events=None, backend=None, **overrides):
+    """An Orchestrator on the fakes; `backend` replaces FakeBackend(script) when given."""
+    config = make_config(tmp_path, **overrides)
+    archive = FakeArchive()
+    materializer = FakeMaterializer(archive, tmp_path / "ws")
+    judge, store = FakeJudge(), FakeStore()
+    backend = backend if backend is not None else FakeBackend(script)
+    counter = count(1)
+    orch = Orchestrator(
+        config,
+        run_id="run-1",
+        run_dir=tmp_path / "run",
+        archive=archive,
+        materializer=materializer,
+        judge=judge,
+        backend=backend,
+        store=store,
+        new_session_id=lambda: f"sess-{next(counter)}",
+        pacer=pacer,
+        on_event=(lambda env, state: events.append(env.event.kind)) if events is not None else None,
+    )
+    return orch, store, backend, materializer, judge

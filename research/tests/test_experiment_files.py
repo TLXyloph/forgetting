@@ -18,8 +18,8 @@ PAPER_ARMS = [("solo", "solo"), ("parallel", "parallel"), ("team-forget", "team-
 PAPER_FILES = {
     # file: (task directory, overrides shared by every arm)
     "paper-toy-mis": ("toy-mis", {"budget": {"usd": 3.0}, "agent": {"model": "haiku"}}),
-    "paper-vliw": ("vliw", {"budget": {"proposals": 160, "primary": "proposals", "usd": 0}}),
-    "paper-ahc014": ("ahc014", {"budget": {"proposals": 160, "primary": "proposals", "usd": 0}}),
+    "paper-vliw": ("vliw", {"budget": {"proposals": 160, "primary": "proposals", "usd": 200}}),
+    "paper-ahc014": ("ahc014", {"budget": {"proposals": 160, "primary": "proposals", "usd": 200}}),
 }
 
 # arm -> (preset, arm-level overrides), in file order
@@ -99,6 +99,7 @@ def test_subscription_experiments_explain_the_scale_down(name: str) -> None:
     assert "DeepSeek V4.1 Flash" in text
     assert "$20" in text and "$40" in text
     assert "160 proposals" in text
+    assert "safety cap" in text and "usd = 0" not in text  # proposals primary, dollars capped
 
 
 def test_bets_cover_the_listed_policies_in_order() -> None:
@@ -161,7 +162,7 @@ def test_proposal_budget_reaches_the_config(name: str) -> None:
     for arm, _ in PAPER_ARMS:
         config = resolved(load(name), arm)
         assert config.budget.proposals == 160
-        assert config.budget.usd == 0
+        assert config.budget.usd == 200  # a safety cap, never the unit forgets are scheduled in
         assert config.budget.primary == "proposals"
 
 

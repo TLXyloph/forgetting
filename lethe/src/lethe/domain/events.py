@@ -91,6 +91,7 @@ class TurnFinished:
     error: str | None = None
     five_hour_utilization: float | None = None
     seven_day_utilization: float | None = None
+    error_kind: str | None = None  # why an "error" turn failed (TurnErrorKind, or "harness")
 
 
 @dataclass(frozen=True)
@@ -124,12 +125,22 @@ class RateLimited:
     message: str
 
 
+RunStatus = Literal["completed", "interrupted", "crashed", "stopped"]
+
+
 @dataclass(frozen=True)
 class RunFinished:
+    """The run ended. `status`: "completed" (a budget ran out), "interrupted" (Ctrl-C),
+    "crashed" (an unexpected exception) or "stopped" (every agent gave up after repeated
+    errors, or safe mode refused API-key billing). Logs written before `status` existed
+    decode as "completed"; their `reason` text tells the cases apart.
+    """
+
     kind: ClassVar[str] = "run_finished"
     reason: str
     best_cand_id: str | None
     best_score: float | None
+    status: str = "completed"
 
 
 Event = (

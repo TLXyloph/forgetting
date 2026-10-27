@@ -4,11 +4,13 @@ Layout: `<runs_root>/<experiment>/<arm>/rep<k>/events.jsonl`, with k counting fr
 named `rep<k>.incomplete-<timestamp>` are partial runs the matrix runner parked; they never match
 the `rep<k>` pattern, so every function here ignores them.
 
-A run is *complete* when its log holds `run_finished` with a reason that is not an abnormal end.
-The harness also writes `run_finished` when it is interrupted (Ctrl-C) and when every agent gave
-up after repeated errors; those runs did not use their budget, so they are neither results to
-compare nor runs to skip when resuming. Any other reason (budget exhausted, "finished", anything
-the harness may add later) counts as complete.
+A run is *complete* when its log holds `run_finished` that is not an abnormal end. The harness
+also writes `run_finished` when it is interrupted (Ctrl-C), when it crashed, and when it stopped
+(every agent gave up after repeated errors, or safe mode refused API-key billing); those runs did
+not use their budget, so they are neither results to compare nor runs to skip when resuming.
+The event's `status` says which ("completed" is the only normal one). Logs written before the
+status existed decode as "completed", so for those the reason text decides: it must not contain
+one of ABNORMAL_ENDS.
 """
 
 from __future__ import annotations
@@ -25,11 +27,14 @@ from research.experiment import is_valid_name
 
 __all__ = [
     "ABNORMAL_ENDS",
+    "ABNORMAL_STATUSES",
     "EVENTS_FILE",
     "RunLocation",
     "arm_dir_for",
     "discover_runs",
+    "ending_is_complete",
     "find_rep_dirs",
+    "finish_event",
     "finish_reason",
     "is_run_complete",
     "next_free_rep",
@@ -39,8 +44,11 @@ __all__ = [
 ]
 
 EVENTS_FILE = "events.jsonl"
-# lower-case fragments of `run_finished` reasons that mark a run as cut short (see module docs)
-ABNORMAL_ENDS: tuple[str, ...] = ("interrupted", "repeated errors")
+# `run_finished` statuses of runs that were cut short (see module docs)
+ABNORMAL_STATUSES: tuple[str, ...] = ("interrupted", "crashed", "stopped")
+# lower-case fragments of `run_finished` reasons that mark a run as cut short, for logs written
+# before RunFinished had a status
+ABNORMAL_ENDS: tuple[str, ...] = ("interrupted", "repeated errors", "crashed:")
 _REP_PATTERN = re.compile(r"rep([1-9][0-9]*)")
 
 log = logging.getLogger(__name__)
@@ -72,8 +80,8 @@ def run_dir_for(runs_root: Path, experiment: str, arm: str, rep: int) -> Path:
     return arm_dir_for(runs_root, experiment, arm) / rep_name(rep)
 
 
-def finish_reason(events_path: Path) -> str | None:
-    """The reason in the log's `run_finished` event; None if there is none.
+def finish_event(events_path: Path) -> RunFinished | None:
+    """The log's `run_finished` event; None if there is none.
 
     A missing, empty, torn or corrupt log has none (corruption is logged): the safe consequence
     is that a matrix reruns the replicate, after parking the old directory.
@@ -81,7 +89,7 @@ def finish_reason(events_path: Path) -> str | None:
     try:
         for envelope in read_events(events_path):
             if isinstance(envelope.event, RunFinished):
-                return envelope.event.reason
+                return envelope.event
     except FileNotFoundError:
         return None
     except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -89,16 +97,28 @@ def finish_reason(events_path: Path) -> str | None:
     return None
 
 
+def finish_reason(events_path: Path) -> str | None:
+    """The reason in the log's `run_finished` event; None if there is none."""
+    event = finish_event(events_path)
+    return None if event is None else event.reason
+
+
 def reason_is_complete(reason: str) -> bool:
-    """False for the `run_finished` reasons that mean the run was cut short."""
+    """False for the `run_finished` reasons that mean the run was cut short (old logs)."""
     lowered = reason.lower()
     return not any(marker in lowered for marker in ABNORMAL_ENDS)
 
 
+def ending_is_complete(status: str, reason: str) -> bool:
+    """True for a normal end: status "completed" (also what logs without a status decode to)
+    and, as the fallback for such old logs, a reason that is not an abnormal one."""
+    return status not in ABNORMAL_STATUSES and reason_is_complete(reason)
+
+
 def is_run_complete(events_path: Path) -> bool:
-    """True when the run ended by itself: `run_finished` with a non-abnormal reason."""
-    reason = finish_reason(events_path)
-    return reason is not None and reason_is_complete(reason)
+    """True when the run ended by itself: `run_finished` that is not an abnormal end."""
+    event = finish_event(events_path)
+    return event is not None and ending_is_complete(event.status, event.reason)
 
 
 def find_rep_dirs(arm_dir: Path) -> dict[int, Path]:

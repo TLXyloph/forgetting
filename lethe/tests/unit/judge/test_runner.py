@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 from pathlib import Path
@@ -17,9 +16,7 @@ ENV_JUDGE = """
             "LETHE_CAND_ID", "EXTRA_FLAG"]
     seen = {key: os.environ.get(key) for key in keys}
     seen["cwd"] = os.getcwd()
-    with open(os.path.join(os.environ["LETHE_OUT"], "env.json"), "w") as handle:
-        json.dump(seen, handle)
-    print(json.dumps({"score": 0.25, "feedback": "looks fine", "metrics": {"n": 3},
+    print(json.dumps({"score": 0.25, "feedback": "looks fine", "metrics": {"n": 3, **seen},
                       "cases": {"a": 1}}))
 """
 
@@ -51,6 +48,8 @@ INFRA_JUDGE = """
         {"run": "   \n"},
         {"max_feedback_chars": -1},
         {"env": {"FLAG": 1}},
+        {"output": "files"},
+        {"output": None},
     ],
 )
 def test_invalid_spec_is_rejected_at_construction(tmp_path, overrides):
@@ -76,18 +75,18 @@ def test_success_reports_the_result_and_exposes_the_judge_environment(
     result = evaluate(runner, materialize, cand_id="c0007", key="key-1")
 
     assert (result.valid, result.score, result.feedback) == (True, 0.25, "looks fine")
-    assert result.metrics == {"n": 3}
+    seen = dict(result.metrics)
+    assert seen.pop("n") == 3
     assert result.cases == {"a": 1.0}
     assert result.error is None
     assert result.cache_hit is False
     assert result.duration_s > 0
     (tree,) = materialize.trees
-    assert tree == tmp_path / "work" / "c0007-1" / "tree"
-    out = tree.parent / "out"
-    seen = json.loads((out / "env.json").read_text())
+    assert tree.name == "tree" and tree.parent.name.startswith("lethe-judge-")
+    assert tree.parent.parent == tmp_path / "work"
     assert seen["LETHE_TASK_DIR"] == str(tmp_path / "task")
     assert seen["LETHE_CANDIDATE"] == str(tree)
-    assert seen["LETHE_OUT"] == str(out)
+    assert seen["LETHE_OUT"] is None  # stdout mode (the default) never reads a result file
     assert seen["LETHE_SPLIT"] == "test"  # LETHE_* wins over spec.env
     assert seen["LETHE_CAND_ID"] == "c0007"
     assert seen["EXTRA_FLAG"] == "on"
@@ -147,14 +146,14 @@ def test_judge_stdin_is_not_inherited(make_runner, judge_tree, evaluate):
 # --- result.json and exit codes ---------------------------------------------------------------
 
 
-def test_result_json_in_the_out_dir_beats_stdout(make_runner, judge_tree, evaluate):
+def test_file_mode_result_json_beats_stdout(make_runner, judge_tree, evaluate):
     source = """
         import json, os
         path = os.path.join(os.environ["LETHE_OUT"], "result.json")
         json.dump({"score": 7, "feedback": "from file"}, open(path, "w"))
         print('{"score": 1}')
     """
-    result = evaluate(make_runner(), judge_tree(source))
+    result = evaluate(make_runner(output="file"), judge_tree(source))
     assert (result.valid, result.score, result.feedback) == (True, 7.0, "from file")
 
 
@@ -164,7 +163,7 @@ def test_malformed_result_json_is_invalid(make_runner, judge_tree, evaluate):
         open(os.path.join(os.environ["LETHE_OUT"], "result.json"), "w").write("{oops")
         print('{"score": 1}')
     """
-    result = evaluate(make_runner(), judge_tree(source))
+    result = evaluate(make_runner(output="file"), judge_tree(source))
     assert result.valid is False
     assert result.score is None
     assert result.feedback.startswith("result.json is not valid JSON: ")
@@ -283,11 +282,10 @@ def test_exit_75_is_retried_once_in_a_fresh_attempt_dir(
 
     assert (result.valid, result.score, result.error) == (True, 2.0, None)
     assert count_runs(counter) == 2
-    work = tmp_path / "work"
-    assert materialize.trees == [work / "c0001-1" / "tree", work / "c0001-2" / "tree"]
-    for attempt in ("c0001-1", "c0001-2"):
-        assert (work / attempt / "out").is_dir()
-        assert not (work / attempt / "tree").exists()
+    first, second = materialize.trees
+    assert first.parent != second.parent  # a fresh attempt directory for the retry
+    for tree in (first, second):
+        assert tree.parent.name.startswith("lethe-judge-") and not tree.parent.exists()
 
 
 def test_exit_75_twice_is_invalid_with_an_infrastructure_error(
@@ -326,39 +324,24 @@ def test_materialize_exception_becomes_an_invalid_result(
     assert result.score is None
     assert result.error == "could not materialize candidate: disk exploded"
     assert "disk exploded" in result.feedback
-    assert not (tmp_path / "work" / "c0001-1" / "tree").exists()
-    assert (tmp_path / "work" / "c0001-1" / "out").is_dir()
+    assert list((tmp_path / "work").iterdir()) == []  # the half-written tree is gone
 
     retry = evaluate(runner, judge_tree("print(4)"))  # failures are not cached
     assert (retry.valid, retry.score, retry.cache_hit) == (True, 4.0, False)
 
 
-def test_tree_is_removed_and_out_is_kept(tmp_path, make_runner, judge_tree, evaluate):
+def test_the_tree_and_the_out_dir_are_both_removed(tmp_path, make_runner, judge_tree, evaluate):
     source = """
-        import os
-        open(os.path.join(os.environ["LETHE_OUT"], "artifact.txt"), "w").write("kept")
+        import json, os
+        out = os.environ["LETHE_OUT"]
+        open(os.path.join(out, "artifact.txt"), "w").write("temporary")
         open("scratch.bin", "w").write("temporary")
-        print(1)
+        json.dump({"score": 1, "feedback": out}, open(os.path.join(out, "result.json"), "w"))
     """
-    evaluate(make_runner(), judge_tree(source), cand_id="c0003")
-    attempt = tmp_path / "work" / "c0003-1"
-    assert not (attempt / "tree").exists()
-    assert (attempt / "out" / "artifact.txt").read_text() == "kept"
-
-
-def test_attempt_numbers_continue_after_existing_directories(
-    tmp_path, make_runner, judge_tree, evaluate
-):
-    (tmp_path / "work" / "c0001-1").mkdir(parents=True)
-    (tmp_path / "work" / "c0001-2").mkdir()
-    runner = make_runner(cache=False)
-    materialize = judge_tree("print(1)")
-
-    evaluate(runner, materialize)
-    evaluate(runner, materialize)
-
-    work = tmp_path / "work"
-    assert materialize.trees == [work / "c0001-3" / "tree", work / "c0001-4" / "tree"]
+    result = evaluate(make_runner(output="file"), judge_tree(source), cand_id="c0003")
+    assert result.score == 1.0
+    assert not Path(result.feedback).exists()
+    assert list((tmp_path / "work").iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -376,7 +359,9 @@ def test_bad_candidate_ids_are_rejected_before_anything_happens(
 
 
 @pytest.mark.parametrize("cand_id", ["c0001", "seed.v2-3_x", "..", "A", "9"])
-def test_good_candidate_ids_are_accepted(tmp_path, make_runner, judge_tree, evaluate, cand_id):
-    result = evaluate(make_runner(), judge_tree("print(1)"), cand_id=cand_id)
-    assert result.valid is True
-    assert (tmp_path / "work" / f"{cand_id}-1" / "out").is_dir()
+def test_good_candidate_ids_are_accepted(make_runner, judge_tree, evaluate, cand_id):
+    source = (
+        "import json, os\nprint(json.dumps({'score': 1, 'feedback': os.environ['LETHE_CAND_ID']}))"
+    )
+    result = evaluate(make_runner(), judge_tree(source), cand_id=cand_id)
+    assert (result.valid, result.feedback) == (True, cand_id)

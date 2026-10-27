@@ -5,7 +5,8 @@ through $LETHE_TASK_DIR and runs it with cwd = the judge tree (the seed with the
 editable files overlaid).
 
 For each graph the candidate (`python3 solver.py`, the graph on stdin) gets 2 seconds of wall-clock
-time, interpreter start-up included. Per graph:
+time, interpreter start-up included, and a minimal environment (no LETHE_* variables, no
+credentials). Per graph:
   * timeout            -> the graph scores 0 (the candidate stays valid; the feedback says so);
   * crash, bad ids, repeated ids or two adjacent vertices -> the candidate is invalid;
   * otherwise          -> 100 * |S| / |S_ref|, where S_ref is minimum-degree greedy, computed here.
@@ -46,6 +47,9 @@ DEGREES = (8, 12, 16, 10, 14, 20, 12, 18, 10, 16, 14, 12)  # target average degr
 COORD = 1_000_000
 MAX_OUTPUT_BYTES = 1_000_000
 MAX_FILE_BYTES = 64 * 1024 * 1024
+# All the candidate inherits from the judge's environment (plus LC_*): enough to run Python.
+INHERITED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TEMP", "TMP")
+INHERITED_ENV += ("TZ", "SYSTEMROOT")
 
 
 @dataclass(frozen=True)
@@ -117,7 +121,7 @@ def run_solver(
     cwd: Path, stdin_path: Path, stdout_path: Path, stderr_path: Path
 ) -> tuple[int, bool, float]:
     """Run solver.py on one graph; returns (exit code, timed_out, wall seconds)."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("LETHE_")}
+    env = {k: v for k, v in os.environ.items() if k in INHERITED_ENV or k.startswith("LC_")}
     env.update(PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1")
     with (
         open(stdin_path, "rb") as stdin,

@@ -4,8 +4,9 @@ Runs with cwd = the judge tree, where `[judge].build` has already compiled the c
 main.cpp into ./main. For the official inputs 0000..0029 (from the tools that
 research/scripts/fetch_ahc014.sh downloads and builds into research/tasks/ahc014/vendor/):
 
-  1. ./main runs with the input on stdin and a 5 s wall-clock limit (AHC014_TIME_LIMIT_S
-     overrides it); stdout goes to a file;
+  1. ./main runs with the input on stdin, a 5 s wall-clock limit (AHC014_TIME_LIMIT_S
+     overrides it) and a minimal environment (no LETHE_* variables, no credentials); stdout goes
+     to a file;
   2. the official `vis` binary scores that output: `vis <input> <output>` prints `Score = <n>`.
 
 A run that times out, crashes, or whose output `vis` rejects scores 0 on that input (as in the
@@ -43,6 +44,10 @@ TIME_LIMIT_S = 5.0
 VIS_TIMEOUT_S = 20.0
 MAX_FILE_BYTES = 64 * 1024 * 1024
 SCORE_RE = re.compile(r"Score\s*=\s*(\d+)")
+# All the candidate program inherits from the judge's environment (plus LC_*): no LETHE_*
+# variables and no credentials.
+INHERITED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TEMP", "TMP")
+INHERITED_ENV += ("TZ", "SYSTEMROOT")
 
 
 def find_tools(vendor: Path) -> tuple[Path, Path] | None:
@@ -70,8 +75,9 @@ def run_limited(
     stderr_path: Path,
     timeout: float,
 ) -> tuple[int, bool, float]:
-    """Run a process in its own session; returns (exit code, timed_out, wall seconds)."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("LETHE_")}
+    """Run a process in its own session with a minimal environment; returns (exit code,
+    timed_out, wall seconds)."""
+    env = {k: v for k, v in os.environ.items() if k in INHERITED_ENV or k.startswith("LC_")}
     with contextlib.ExitStack() as files:
         stdin = files.enter_context(open(stdin_path, "rb")) if stdin_path else subprocess.DEVNULL
         out = files.enter_context(open(stdout_path, "wb"))

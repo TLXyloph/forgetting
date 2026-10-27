@@ -30,17 +30,17 @@ def relative_gain(new: float, old: float, direction: Direction) -> float:
 
 
 def improved_since(state: RunState, seq: int, min_gain: float = 0.0) -> bool:
-    """True if the team best improved by at least `min_gain` (relative) after event `seq`."""
-    previous = state.best_at(seq)
+    """True if the team best improved by at least `min_gain` (relative) after event `seq`.
+
+    Every later best is measured against the best at `seq` (the window start), so several small
+    steps that add up to `min_gain` count as an improvement.
+    """
+    start = state.best_at(seq)
     for entry in state.best_history:
         if entry.seq <= seq:
             continue
-        if (
-            previous is None
-            or relative_gain(entry.score, previous.score, state.direction) >= min_gain
-        ):
+        if start is None or relative_gain(entry.score, start.score, state.direction) >= min_gain:
             return True
-        previous = entry
     return False
 
 

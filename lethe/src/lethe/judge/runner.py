@@ -9,26 +9,54 @@ import random
 import re
 import shutil
 import signal
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Literal
 
 from lethe.domain.types import Direction, JudgeResult
 from lethe.judge.contract import JudgeInfraError, _output_tail, parse_judge_output
-from lethe.workspace.paths import safe_join
+
+JudgeOutput = Literal["stdout", "file"]
+OUTPUTS: tuple[str, ...] = ("stdout", "file")
 
 _CAND_ID = re.compile(r"[A-Za-z0-9_.-]+")
 _MAX_CAPTURE_BYTES = 1024 * 1024  # per stream (stdout, stderr) and for result.json
 _READ_CHUNK = 64 * 1024
 _REAP_GRACE_S = 5.0  # how long to wait for a killed process to be collected
 _INFRA_ERROR = "judge infrastructure failure (exit 75)"
+_NO_RESULT_FILE = (
+    'the judge exited 0 without writing $LETHE_OUT/result.json (judge.output = "file")'
+)
 _SEEDS = random.SystemRandom()
+# The only variables a judge inherits from lethe's own environment (plus LC_*): enough to find
+# programs and run them, never credentials (API keys, cloud and git tokens stay behind).
+INHERITED_ENV = frozenset(
+    (
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "TZ",
+        "SYSTEMROOT",
+    )
+)
 
 
 @dataclass(frozen=True)
 class JudgeSpec:
-    """How to score a candidate. `run` and `build` are shell commands run with cwd = judge tree."""
+    """How to score a candidate. `run` and `build` are shell commands run with cwd = judge tree.
+
+    `output` names the one channel the verdict is read from: "stdout" (the last non-empty
+    line; no file is ever read) or "file" (`$LETHE_OUT/result.json`, in a private directory).
+    """
 
     run: str
     direction: Direction
@@ -39,6 +67,7 @@ class JudgeSpec:
     max_feedback_chars: int = 4000
     split: str = "dev"
     env: Mapping[str, str] = field(default_factory=dict)
+    output: JudgeOutput = "stdout"
 
 
 @dataclass(frozen=True)
@@ -62,15 +91,24 @@ class _Outcome:
 class JudgeRunner:
     """Evaluates candidates. Safe to call `evaluate` concurrently; at most `spec.concurrency` run.
 
-    For each evaluation the runner creates `work_root/<cand_id>-<n>/{tree,out}`, calls
-    `materialize(tree)` in a worker thread to write the full judge tree, then runs `spec.build`
-    (if set) and `spec.run` via the shell with cwd=tree and env = os.environ + spec.env +
-      LETHE_TASK_DIR (task_dir), LETHE_CANDIDATE (tree), LETHE_OUT (out dir),
-      LETHE_SPLIT (spec.split), LETHE_SEED (fresh random 32-bit int), LETHE_CAND_ID.
+    Each attempt gets a fresh directory `tempfile.mkdtemp(prefix="lethe-judge-", dir=work_root)`
+    (`work_root` None: the system temp dir, outside any run or task directory) holding `tree/`.
+    The runner calls `materialize(tree)` in a worker thread to write the full judge tree, then
+    runs `spec.build` (if set) and `spec.run` via the shell with cwd=tree and an env that is
+    only an allowlist of lethe's own (PATH, HOME, USER, LOGNAME, SHELL, LANG, LC_*, TMPDIR,
+    TEMP, TMP, TZ, SYSTEMROOT) + spec.env +
+      LETHE_TASK_DIR (task_dir), LETHE_CANDIDATE (tree), LETHE_SPLIT (spec.split),
+      LETHE_SEED (fresh random 32-bit int), LETHE_CAND_ID,
+      and, with `spec.output == "file"` only, LETHE_OUT: a private directory made with
+      `tempfile.mkdtemp(prefix="lethe-out-")`, neither inside nor beside the judge tree.
+    The verdict comes from the declared channel alone: stdout mode never reads a file (so code
+    the judge runs cannot plant one); file mode reads `<LETHE_OUT>/result.json` and nothing
+    else, and a judge that exits 0 without writing it is invalid.
     Each command runs in its own process group; on timeout the whole group is killed and the
     candidate is invalid ("judge timed out after Ns"). A failed build is invalid with the build's
     output as feedback. `JudgeInfraError` (exit 75) is retried once, then reported as invalid
-    with `error` set. The tree directory is deleted afterwards; `out/` is kept.
+    with `error` set. The attempt directory and the out directory are deleted after every
+    attempt.
 
     With `spec.cache`, results are memoized by `judged_key`: a repeat key returns the stored
     result with `cache_hit=True` without running anything.
@@ -81,7 +119,7 @@ class JudgeRunner:
     materialization failures are reported but never memoized, so a resubmission is retried.
     """
 
-    def __init__(self, spec: JudgeSpec, *, task_dir: Path, work_root: Path) -> None:
+    def __init__(self, spec: JudgeSpec, *, task_dir: Path, work_root: Path | None = None) -> None:
         if spec.concurrency < 1:
             raise ValueError(f"concurrency must be >= 1, got {spec.concurrency!r}")
         if not spec.timeout_s > 0:  # written this way so NaN is rejected too
@@ -92,10 +130,12 @@ class JudgeRunner:
             raise ValueError(f"max_feedback_chars must be >= 0, got {spec.max_feedback_chars!r}")
         if not all(isinstance(k, str) and isinstance(v, str) for k, v in spec.env.items()):
             raise ValueError("env must map strings to strings")
+        if spec.output not in OUTPUTS:
+            raise ValueError(f"output must be 'stdout' or 'file', got {spec.output!r}")
         self._spec = spec
         # Absolute (not resolved: symlinks stay) so the judge can use them from any cwd.
         self._task_dir = Path(os.path.abspath(task_dir))
-        self._work_root = Path(os.path.abspath(work_root))
+        self._work_root = None if work_root is None else Path(os.path.abspath(work_root))
         self._cache: dict[str, JudgeResult] = {}
         self._inflight: dict[str, asyncio.Future[JudgeResult | None]] = {}
         self._slots: asyncio.Semaphore | None = None
@@ -108,8 +148,8 @@ class JudgeRunner:
         judged_key: str,
         materialize: Callable[[Path], None],
     ) -> JudgeResult:
-        """Judge one candidate. `cand_id` names its work dirs, `judged_key` identifies its content
-        for the cache, and `materialize(tree)` writes the complete judge tree into `tree`.
+        """Judge one candidate. `cand_id` is passed on as LETHE_CAND_ID, `judged_key` identifies
+        its content for the cache, and `materialize(tree)` writes the complete judge tree.
 
         A bad candidate or a broken judge is an invalid `JudgeResult`, never an exception; only a
         malformed `cand_id` raises (`ValueError`). Cancelling the call kills the judge's process
@@ -182,11 +222,13 @@ class JudgeRunner:
     # --- one attempt: materialize, build, run, parse ---
 
     async def _attempt(self, cand_id: str, materialize: Callable[[Path], None]) -> _Outcome:
-        attempt_dir = self._new_attempt_dir(cand_id)
-        tree, out = attempt_dir / "tree", attempt_dir / "out"
-        tree.mkdir()
-        out.mkdir()
+        attempt_dir = self._new_attempt_dir()
+        tree = attempt_dir / "tree"
+        out: Path | None = None
         try:
+            if self._spec.output == "file":
+                out = Path(tempfile.mkdtemp(prefix="lethe-out-"))
+            tree.mkdir()
             try:
                 await asyncio.to_thread(materialize, tree)
             except Exception as exc:
@@ -213,13 +255,17 @@ class JudgeRunner:
             run = await self._run_command(self._spec.run, cwd=tree, env=env)
             if run.timed_out:
                 return self._timeout_outcome()
-            try:
-                result_json = _read_result_json(out)
-            except OSError as exc:
-                unreadable = JudgeResult(
-                    valid=False, score=None, feedback=f"could not read result.json: {exc}"
-                )
-                return _Outcome(unreadable)
+            result_json: str | None = None
+            if out is not None:
+                try:
+                    result_json = _read_result_json(out)
+                except OSError as exc:
+                    unreadable = JudgeResult(
+                        valid=False, score=None, feedback=f"could not read result.json: {exc}"
+                    )
+                    return _Outcome(unreadable)
+                if result_json is None and run.exit_code == 0:
+                    return _Outcome(JudgeResult(valid=False, score=None, feedback=_NO_RESULT_FILE))
             return _Outcome(
                 parse_judge_output(
                     stdout=run.stdout,
@@ -230,32 +276,28 @@ class JudgeRunner:
                 )
             )
         finally:
-            await asyncio.to_thread(shutil.rmtree, tree, ignore_errors=True)
+            for directory in (attempt_dir, out):
+                if directory is not None:
+                    await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
 
-    def _new_attempt_dir(self, cand_id: str) -> Path:
-        """Create `work_root/<cand_id>-<n>` for the first unused n (mkdir is atomic)."""
-        self._work_root.mkdir(parents=True, exist_ok=True)
-        attempt = 0
-        while True:
-            attempt += 1
-            directory = safe_join(self._work_root, f"{cand_id}-{attempt}")
-            try:
-                directory.mkdir()
-            except FileExistsError:
-                continue
-            return directory
+    def _new_attempt_dir(self) -> Path:
+        """A new private directory (mode 0700) under `work_root`, or the system temp dir."""
+        if self._work_root is not None:
+            self._work_root.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="lethe-judge-", dir=self._work_root))
 
-    def _environment(self, cand_id: str, tree: Path, out: Path) -> dict[str, str]:
-        env = dict(os.environ)
+    def _environment(self, cand_id: str, tree: Path, out: Path | None) -> dict[str, str]:
+        env = judge_base_env()
         env.update(self._spec.env)
         env.update(
             LETHE_TASK_DIR=str(self._task_dir),
             LETHE_CANDIDATE=str(tree),
-            LETHE_OUT=str(out),
             LETHE_SPLIT=self._spec.split,
             LETHE_SEED=str(_SEEDS.randrange(2**32)),
             LETHE_CAND_ID=cand_id,
         )
+        if out is not None:
+            env["LETHE_OUT"] = str(out)
         return env
 
     def _timeout_outcome(self) -> _Outcome:
@@ -298,6 +340,11 @@ class JudgeRunner:
         finally:
             for reader in readers:
                 reader.cancel()
+
+
+def judge_base_env() -> dict[str, str]:
+    """The part of lethe's environment a judge inherits: INHERITED_ENV and LC_* only."""
+    return {k: v for k, v in os.environ.items() if k in INHERITED_ENV or k.startswith("LC_")}
 
 
 def _detached(result: JudgeResult) -> JudgeResult:

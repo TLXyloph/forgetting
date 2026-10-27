@@ -82,11 +82,15 @@ def write_tree(
 
 
 def read_tree(root: Path) -> dict[str, bytes]:
-    """Every regular file under `root` as {posix relative path: bytes} (empty dirs are ignored)."""
+    """Every regular file under `root` as {posix relative path: bytes} (empty dirs are ignored).
+
+    A `.git` directory is left out: every workspace is an empty repository on purpose
+    (test_workspace_git.py covers it).
+    """
     return {
         p.relative_to(root).as_posix(): p.read_bytes()
         for p in sorted(root.rglob("*"))
-        if p.is_file() and not p.is_symlink()
+        if p.is_file() and not p.is_symlink() and ".git" not in p.relative_to(root).parts
     }
 
 

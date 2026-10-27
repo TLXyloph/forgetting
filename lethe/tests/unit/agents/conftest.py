@@ -77,6 +77,10 @@ class FakeClaude:
         return json.loads((self.record_dir / "argv.json").read_text(encoding="utf-8"))
 
     @property
+    def env_names(self) -> set[str]:
+        return set(json.loads((self.record_dir / "env.json").read_text(encoding="utf-8")))
+
+    @property
     def cwd(self) -> Path:
         return Path((self.record_dir / "cwd.txt").read_text(encoding="utf-8"))
 

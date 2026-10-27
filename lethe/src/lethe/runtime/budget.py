@@ -78,13 +78,15 @@ class Pacer:
         self.paused_until = 0.0
 
     def observe(self, info: RateLimitInfo | None) -> float | None:
-        """Record a healthy turn's meter; pause if the 5-hour window crossed `pause_at`."""
+        """Record a healthy turn's meter; pause if the 5-hour window crossed `pause_at`, until
+        that window resets (`five_hour_resets_at`; the event's `resets_at` when absent)."""
         if info is None:
             return None
         self._backoff = self._base
         util = info.five_hour_utilization
         if util is not None and util >= self.pause_at:
-            return self._pause_until(info.resets_at)
+            resets = info.five_hour_resets_at
+            return self._pause_until(info.resets_at if resets is None else resets)
         return None
 
     def note_rate_limited(self, info: RateLimitInfo | None) -> float:

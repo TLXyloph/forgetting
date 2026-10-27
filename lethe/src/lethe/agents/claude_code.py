@@ -5,6 +5,11 @@ Works with a Claude subscription login (no API key needed) in the default `safe`
 command-running tools and confines file tools to the working directory;
 `--disable-slash-commands` removes skills/commands from the context. `bare` isolation uses
 `--bare` instead of `--safe-mode` and requires ANTHROPIC_API_KEY in the environment.
+
+Safe isolation also keeps the subscription promise: unless `allow_api_billing` is set, `claude`
+runs without the variables that would bill an API key or a cloud provider (API_BILLING_ENV), and
+a turn whose init line still reports an API key (`apiKeySource` other than "none") is refused
+with error_kind "billing", which stops the run.
 """
 
 from __future__ import annotations
@@ -27,6 +32,17 @@ from lethe.domain.types import SessionChoice, TurnErrorKind, TurnResult
 Isolation = Literal["safe", "bare", "none"]
 
 DEFAULT_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
+
+# Variables that make `claude` bill an API key or a cloud provider instead of the subscription
+# login. Safe isolation launches it without them unless `allow_api_billing` is set.
+API_BILLING_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -59,6 +75,7 @@ class ClaudeCodeOptions:
     permission_mode: str = "acceptEdits"
     turn_timeout_s: float = 1800.0
     extra_args: tuple[str, ...] = ()
+    allow_api_billing: bool = False  # safe isolation: keep the API-key variables (see run_turn)
 
 
 class ClaudeCodeBackend:
@@ -75,6 +92,20 @@ class ClaudeCodeBackend:
         if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not timeout > 0:
             raise ValueError(f"turn_timeout_s must be a positive number, got {timeout!r}")
         self.options = opts
+        # session id -> its latest cumulative total_cost_usd (for streams without per-turn usage)
+        self._session_totals: dict[str, float] = {}
+
+    @property
+    def refuses_api_billing(self) -> bool:
+        """True in safe isolation unless `allow_api_billing`: subscription login only."""
+        return self.options.isolation == "safe" and not self.options.allow_api_billing
+
+    def child_env(self) -> dict[str, str] | None:
+        """The environment `claude` runs with: lethe's own (None), minus API_BILLING_ENV when
+        `refuses_api_billing`."""
+        if not self.refuses_api_billing:
+            return None
+        return {k: v for k, v in os.environ.items() if k not in API_BILLING_ENV}
 
     def build_argv(self, session: SessionChoice) -> list[str]:
         """Exact argv (without the prompt), in this order:
@@ -124,16 +155,24 @@ class ClaudeCodeBackend:
         session: SessionChoice,
         transcript_path: Path,
     ) -> TurnResult:
-        """Run `build_argv(session)` with cwd=workspace, prompt on stdin, in a new process group.
+        """Run `build_argv(session)` with cwd=workspace, prompt on stdin, in a new process group,
+        with `child_env()` as its environment.
 
         Streams stdout lines into `transcript_path` (parent dirs created) and parses them with
-        `parse_stream`. Outcomes:
+        `parse_stream`. Outcomes, in this order:
+          * `refuses_api_billing` and the init line's apiKeySource is not "none"
+            -> ok=False, error_kind="billing" (the turn ran on an API key: the run must stop)
           * timeout (options.turn_timeout_s): kill the process group
             -> ok=False, error_kind="timeout"
-          * `looks_rate_limited` -> ok=False, error_kind="rate_limit" (rate_limit info attached)
+          * `looks_rate_limited` with no result or an error result
+            -> ok=False, error_kind="rate_limit" (a successful result wins; rate_limit info is
+            attached either way, for the pacer)
           * result.is_error -> ok=False, error_kind="api"
           * nonzero exit or no result line -> ok=False, error_kind="process" (stderr tail in error)
           * otherwise ok=True.
+        `cost_usd` is the stream's per-turn cost; when the CLI reports only the cumulative
+        session total, it is that total minus the last total seen for the session (by resume
+        id, so a session that comes back under a new id is charged correctly).
         `session_id` in the result is the one reported by the stream, else `session.session_id`.
         Never raises for agent-side failures; a missing executable raises FileNotFoundError.
         """
@@ -149,6 +188,7 @@ class ClaudeCodeBackend:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=workspace,
+                env=self.child_env(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -166,12 +206,13 @@ class ClaudeCodeBackend:
             returncode=proc.returncode,
             timeout_s=timeout_s,
             stderr_text=log.stderr_text(),
+            refuse_api_key=self.refuses_api_billing,
         )
         return TurnResult(
             session_id=summary.session_id or session.session_id,
             ok=error_kind is None,
             final_text=summary.result_text,
-            cost_usd=summary.cost_usd,
+            cost_usd=self._turn_cost(summary, session),
             usage=summary.usage,
             tool_calls=summary.tool_calls,
             duration_s=duration_s,
@@ -180,6 +221,18 @@ class ClaudeCodeBackend:
             rate_limit=summary.rate_limit,
             num_api_turns=summary.num_api_turns,
         )
+
+    def _turn_cost(self, summary: StreamSummary, session: SessionChoice) -> float:
+        """The stream's per-turn cost, or the growth of the session's cumulative total."""
+        total, cost = summary.total_cost_usd, summary.cost_usd
+        if summary.cost_is_total and total is not None:
+            before = self._session_totals.get(session.session_id, 0.0) if session.resume else 0.0
+            cost = total - before if total >= before else total  # a reset total is all new
+        if total is not None:
+            self._session_totals[session.session_id] = total
+            if summary.session_id:
+                self._session_totals[summary.session_id] = total
+        return cost
 
 
 # --- process supervision ------------------------------------------------------------------------
@@ -304,11 +357,21 @@ def _classify(
     returncode: int | None,
     timeout_s: float,
     stderr_text: str,
+    refuse_api_key: bool = False,
 ) -> tuple[TurnErrorKind | None, str | None]:
-    """timeout > rate_limit > api > process > ok, with a short human message for each failure."""
+    """billing > timeout > rate_limit > api > process > ok, with a short message for each failure.
+
+    A rate-limit signal only fails a turn that has no result or an error result.
+    """
+    source = summary.api_key_source
+    if refuse_api_key and source is not None and source != "none":
+        return "billing", (
+            f"safe mode refused API-key billing (apiKeySource={source}); "
+            "set agent.allow_api_billing = true to allow it"
+        )
     if timed_out:
         return "timeout", f"turn exceeded the {timeout_s:g}s limit and its process group was killed"
-    if looks_rate_limited(summary):
+    if looks_rate_limited(summary) and (not summary.has_result or summary.is_error):
         status = summary.rate_limit.status if summary.rate_limit else "unknown"
         return "rate_limit", _head(summary.result_text) or f"rate limited (status: {status})"
     if summary.is_error:

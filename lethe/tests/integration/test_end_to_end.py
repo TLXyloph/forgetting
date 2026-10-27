@@ -106,22 +106,33 @@ def test_team_forget_run_end_to_end(tmp_path, capsys):
 
 
 def test_clean_forget_drops_scratch_files(tmp_path):
-    run_dir = run(
-        tmp_path,
-        team={"agents": 1, "peers": "none"},
-        forget={"carry_scratch": False, "when": [{"type": "budget_fractions", "fractions": [0.5]}]},
-        budget={"usd": 0, "proposals": 4, "primary": "proposals"},
+    at_start: list[tuple[str, bool]] = []  # (workspace, notes.txt present when the turn began)
+
+    def script(call: ScriptCall) -> ScriptReply:
+        at_start.append((call.workspace.name, (call.workspace / "notes.txt").exists()))
+        return climber(call)
+
+    run_dir = run_task(
+        make_task(tmp_path),
+        overrides={
+            "team": {"agents": 1, "peers": "none"},
+            "forget": {
+                "carry_scratch": False,
+                "when": [{"type": "budget_fractions", "fractions": [0.5]}],
+            },
+            "budget": {"usd": 0, "proposals": 4, "primary": "proposals"},
+        },
+        runs_dir=tmp_path / "runs",
+        run_name="r1",
+        backend=ScriptedBackend(script),
     )
     epoch2 = run_dir / "ws" / "a1" / "e2"
     assert (epoch2 / "solver.py").exists() and (epoch2 / "README.txt").exists()
     seeds = [e for e in (load_run(run_dir).epoch_history) if e.scope == "team"]
     assert seeds  # the forget happened
-    # notes.txt written in epoch 1 rode along in the best candidate but was stripped
-    assert not (epoch2 / "notes.txt").exists() or _written_this_epoch(epoch2)
-
-
-def _written_this_epoch(workspace: Path) -> bool:
-    return (workspace / "notes.txt").read_text().startswith("turn ")
+    # notes.txt, written by every epoch-1 turn, rode along in the best candidate but was stripped
+    assert ("e1", True) in at_start
+    assert next(present for name, present in at_start if name == "e2") is False
 
 
 def test_rerunning_into_an_existing_run_dir_is_refused(tmp_path):

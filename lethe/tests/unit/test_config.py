@@ -122,3 +122,24 @@ def test_claude_options_from_agent_config(tmp_path):
     options = cfg.agent.claude_options()
     assert options.model == "sonnet" and options.effort == "high" and options.shell is True
     assert options.extra_args == ("--x",) and options.isolation == "safe"
+
+
+def test_judge_output_defaults_to_stdout_and_accepts_file(tmp_path):
+    path = write_task(tmp_path, MINIMAL)
+    assert load_config(path).judge.output == "stdout"
+    assert load_config(path).resolved["judge"]["output"] == "stdout"
+    assert load_config(path, overrides={"judge": {"output": "file"}}).judge.output == "file"
+    for bad in ("files", "result.json", 1, None):
+        with pytest.raises(ConfigError, match="judge.output"):
+            load_config(path, overrides={"judge": {"output": bad}})
+
+
+def test_allow_api_billing_defaults_to_false_and_reaches_the_claude_options(tmp_path):
+    path = write_task(tmp_path, MINIMAL)
+    cfg = load_config(path)
+    assert cfg.agent.allow_api_billing is False
+    assert cfg.agent.claude_options().allow_api_billing is False
+    cfg = load_config(path, overrides={"agent": {"allow_api_billing": True}})
+    assert cfg.agent.claude_options().allow_api_billing is True
+    with pytest.raises(ConfigError, match="allow_api_billing"):
+        load_config(path, overrides={"agent": {"allow_api_billing": "yes"}})

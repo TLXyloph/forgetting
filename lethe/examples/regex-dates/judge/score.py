@@ -42,6 +42,8 @@ DEFAULT_TIMEOUT_S = 10.0
 MAX_PATTERN_CHARS = 100_000
 LENGTH_PENALTY = 0.02
 MAX_FILE_BYTES = 64 * 1024 * 1024
+INHERITED_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TEMP", "TMP")
+INHERITED_ENV += ("TZ", "SYSTEMROOT")
 
 MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 FULL_MONTHS = [
@@ -322,7 +324,9 @@ def run_pattern(pattern: str, strings: list[str], timeout: float) -> dict[str, A
             str(scratch / "strings.json"),
             str(scratch / "out.json"),
         ]
-        env = {k: v for k, v in os.environ.items() if not k.startswith("LETHE_")}
+        # Only the judge's own code runs there (a regex executes nothing), but it gets no more of
+        # the environment than the other examples give candidate code.
+        env = {k: v for k, v in os.environ.items() if k in INHERITED_ENV or k.startswith("LC_")}
         proc = subprocess.Popen(
             argv,
             cwd=scratch,

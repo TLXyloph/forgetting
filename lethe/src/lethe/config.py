@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from lethe.agents.claude_code import ClaudeCodeOptions
-from lethe.judge.runner import JudgeSpec
+from lethe.judge.runner import OUTPUTS, JudgeSpec
 from lethe.policy.triggers import trigger_from_dict
 from lethe.runtime.budget import BudgetSpec
 from lethe.workspace.paths import PathFilter, glob_to_regex
@@ -47,6 +47,7 @@ DEFAULTS: dict[str, Any] = {
         "max_feedback_chars": 4000,
         "split": "dev",
         "env": {},
+        "output": "stdout",
     },
     "team": {"agents": 4, "peers": "all", "session": "continue"},
     "forget": {"seed": "best", "carry_scratch": True, "when": []},
@@ -58,6 +59,7 @@ DEFAULTS: dict[str, Any] = {
         "shell": False,
         "turn_timeout": 1800,
         "extra_args": [],
+        "allow_api_billing": False,
     },
     "budget": {
         "usd": 5.0,
@@ -119,6 +121,7 @@ class AgentConfig:
     shell: bool
     turn_timeout: float
     extra_args: tuple[str, ...]
+    allow_api_billing: bool = False
 
     def claude_options(self) -> ClaudeCodeOptions:
         return ClaudeCodeOptions(
@@ -128,6 +131,7 @@ class AgentConfig:
             isolation=self.isolation,  # type: ignore[arg-type]
             turn_timeout_s=self.turn_timeout,
             extra_args=self.extra_args,
+            allow_api_billing=self.allow_api_billing,
         )
 
 
@@ -254,6 +258,8 @@ def _judge(j: dict[str, Any]) -> JudgeSpec:
         isinstance(k, str) and isinstance(v, str) for k, v in env.items()
     ):
         raise ConfigError("judge.env must map names to string values")
+    if j["output"] not in OUTPUTS:
+        raise ConfigError("judge.output must be 'stdout' or 'file'")
     return JudgeSpec(
         run=run,
         direction=j["direction"],
@@ -264,6 +270,7 @@ def _judge(j: dict[str, Any]) -> JudgeSpec:
         max_feedback_chars=int(_num(j, "max_feedback_chars", "judge", minimum=100, integer=True)),
         split=_str(j, "split", "judge"),
         env=dict(env),
+        output=j["output"],
     )
 
 
@@ -315,6 +322,7 @@ def _agent(a: dict[str, Any]) -> AgentConfig:
         shell=_bool(a, "shell", "agent"),
         turn_timeout=_num(a, "turn_timeout", "agent", minimum=0, strict=True),
         extra_args=tuple(extra),
+        allow_api_billing=_bool(a, "allow_api_billing", "agent"),
     )
 
 

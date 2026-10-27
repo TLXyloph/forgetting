@@ -60,10 +60,14 @@ class PathFilter:
 
 
 def safe_relpath(rel: str) -> str:
-    """Normalize a relative POSIX path; reject absolute, empty, NUL-containing, or `..` paths."""
-    if not rel or "\x00" in rel:
+    """Normalize a relative POSIX path; reject absolute, empty, NUL-containing, or `..` paths.
+
+    A backslash is refused too, never read as a separator: on POSIX `a\\b` is one file name,
+    and rewriting it to `a/b` would let it stand in for (and overwrite) a different file.
+    """
+    if not rel or "\x00" in rel or "\\" in rel:
         raise UnsafePathError(f"invalid path: {rel!r}")
-    posix = PurePosixPath(rel.replace("\\", "/"))
+    posix = PurePosixPath(rel)
     if posix.is_absolute() or any(part == ".." for part in posix.parts):
         raise UnsafePathError(f"path escapes its root: {rel!r}")
     parts = [p for p in posix.parts if p not in ("", ".")]

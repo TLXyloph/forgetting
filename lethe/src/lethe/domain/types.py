@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Direction = Literal["max", "min"]
-TurnErrorKind = Literal["rate_limit", "timeout", "process", "api"]
+TurnErrorKind = Literal["rate_limit", "timeout", "process", "api", "billing"]
 
 # Tool names that modify files, as reported by Claude Code's stream-json output.
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
@@ -20,6 +20,13 @@ EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 def is_better(a: float, b: float, direction: Direction) -> bool:
     """True when score `a` strictly improves on score `b` under `direction`."""
     return a > b if direction == "max" else a < b
+
+
+def format_score(score: float | None) -> str:
+    """A score as agents and people see it: compact, but exact to 10 significant digits."""
+    if score is None:
+        return "n/a"
+    return f"{score:.10g}"
 
 
 @dataclass(frozen=True)
@@ -52,13 +59,15 @@ class RateLimitInfo:
     """Subscription meter reported by Claude Code (`rate_limit_event`).
 
     Utilizations are fractions in [0, 1] of the 5-hour and 7-day windows; `resets_at` is an
-    epoch timestamp (seconds) for the window named by the event.
+    epoch timestamp (seconds) for the window named by the event, and `five_hour_resets_at` the
+    reset of the 5-hour window itself (None when the event does not report it).
     """
 
     status: str
     five_hour_utilization: float | None = None
     seven_day_utilization: float | None = None
     resets_at: float | None = None
+    five_hour_resets_at: float | None = None
 
 
 @dataclass(frozen=True)

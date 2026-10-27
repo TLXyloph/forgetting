@@ -3,14 +3,22 @@
 Plain code by design (never an LLM): an LLM orchestrator would accumulate exactly the history
 that forgetting is meant to clear. Every state change goes through `emit`, which appends to the
 event log and folds into `RunState`, so a live run and a replay see the same state.
+
+Every way out of `run` logs `RunFinished` with a status: "completed" (a budget ran out),
+"interrupted" (cancelled, e.g. Ctrl-C), "crashed" (an unexpected exception, re-raised once it is
+logged) or "stopped" (every agent gave up after repeated errors, or safe mode refused API-key
+billing, which stops all agents at once). No agent is still running when it is written.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
+import logging
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
@@ -28,10 +36,11 @@ from lethe.domain.events import (
     RateLimited,
     RunFinished,
     RunStarted,
+    RunStatus,
     TurnFinished,
 )
 from lethe.domain.state import SEED_ID, RunState
-from lethe.domain.types import TurnResult
+from lethe.domain.types import TurnResult, Usage
 from lethe.policy.reducer import TeamPolicy, TurnPlan, plan_turn
 from lethe.policy.seeding import seed_policy_from_name
 from lethe.policy.triggers import ForgetDecision, trigger_from_dict
@@ -40,12 +49,25 @@ from lethe.runtime.budget import Pacer, exhausted, spend_fraction
 from lethe.telemetry.signals import is_plateau_claim
 
 EventHook = Callable[[Envelope, RunState], None]
-TurnOutcome = Literal["ok", "stop"]
+TurnOutcome = Literal["ok", "stop", "fatal"]
+BudgetGate = Literal["go", "wait", "stop"]
+
+_LOG = logging.getLogger(__name__)
+_BILLING = "safe mode refused API-key billing; set agent.allow_api_billing = true to allow it"
+
+
+class _RunStopped(Exception):
+    """Raised in an agent loop to stop every agent at once (a fatal turn)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class Orchestrator:
     MAX_CONSECUTIVE_ERRORS = 5
     SUMMARY_CHARS = 2000
+    BUDGET_POLL_S = 0.2  # how often an agent re-checks a budget only in-flight turns hold
 
     def __init__(
         self,
@@ -86,15 +108,19 @@ class Orchestrator:
         self._stopped_by_errors: set[str] = set()
         self._in_flight = 0
         self._stop_reason: str | None = None
+        self._fatal_reason: str | None = None
         self._t0: float | None = None
-        self._seed_paths: frozenset[str] = frozenset()
 
     # ------------------------------------------------------------------ public
     def emit(self, event: Event) -> Envelope:
         envelope = self.store.append(event)
         self.state.apply(envelope)
         if self._on_event is not None:
-            self._on_event(envelope, self.state)
+            try:
+                self._on_event(envelope, self.state)
+            except Exception as exc:  # e.g. BrokenPipeError from `lethe run | head`
+                _LOG.warning("progress output failed (%r); the run continues without it", exc)
+                self._on_event = None
         return envelope
 
     async def run(self) -> RunState:
@@ -105,7 +131,7 @@ class Orchestrator:
                 cfg.task.name,
                 self.agents,
                 cfg.judge.direction,
-                cfg.resolved,
+                self._logged_config(),
                 __version__,
             )
         )
@@ -113,16 +139,35 @@ class Orchestrator:
             await self._commit_seed()
             self._t0 = self._monotonic()
             await self._start_epochs("start", dict.fromkeys(self.agents, SEED_ID), "run start")
-            await asyncio.gather(*(self._agent_loop(agent) for agent in self.agents))
+            await self._run_agents()
         except asyncio.CancelledError:
-            self._finish("interrupted")
+            self._finish("interrupted", "interrupted")
+            raise
+        except _RunStopped as stop:
+            self._finish(stop.reason, "stopped")
+            return self.state
+        except Exception as exc:
+            self._finish(f"crashed: {type(exc).__name__}: {exc}", "crashed")
             raise
         if self._stop_reason is None and self._stopped_by_errors == set(self.agents):
-            self._stop_reason = "all agents stopped after repeated errors"
-        self._finish(self._stop_reason or "finished")
+            self._finish("all agents stopped after repeated errors", "stopped")
+        else:
+            self._finish(self._stop_reason or "finished")
         return self.state
 
     # ----------------------------------------------------------------- phases
+    async def _run_agents(self) -> None:
+        """Run every agent loop. The first failure (or a fatal stop) cancels the others, and all
+        of them are gone before this raises, so nothing is logged after `RunFinished`."""
+        tasks = [asyncio.ensure_future(self._agent_loop(agent)) for agent in self.agents]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
     async def _commit_seed(self) -> None:
         seed_dir = self.config.task.seed_dir
         snap = await asyncio.to_thread(
@@ -133,50 +178,80 @@ class Orchestrator:
                 SEED_ID, snap.sha, None, "seed", 0, None, snap.judged_key, 0, 0, 0, "task seed"
             )
         )
-        self._seed_paths = frozenset(await asyncio.to_thread(self.archive.files, snap.sha))
         await self._judge(SEED_ID)
 
     async def _start_epochs(self, scope: str, seeds: dict[str, str], reason: str) -> None:
-        keep = None if self.config.forget.carry_scratch else self._clean_keep
+        # A clean start (carry_scratch = false) rebuilds each workspace from the original seed
+        # overlaid with its starting candidate's judged files: scratch files and edits to the
+        # seed's other files stay behind.
+        base = None if self.config.forget.carry_scratch else self.state.candidates[SEED_ID].sha
         epochs = {agent: self.state.epoch(agent) + 1 for agent in seeds}
         for agent, cand_id in seeds.items():
             sha = self.state.candidates[cand_id].sha
             self._workspaces[agent] = await asyncio.to_thread(
-                self.materializer.prepare_epoch, agent, epochs[agent], sha, keep=keep
+                self.materializer.prepare_epoch, agent, epochs[agent], sha, base_sha=base
             )
         self.emit(EpochStarted(scope, dict(seeds), epochs, reason))  # type: ignore[arg-type]
-
-    def _clean_keep(self, path: str) -> bool:
-        return self.config.task.judged(path) or path in self._seed_paths
 
     async def _agent_loop(self, agent: str) -> None:
         while True:
             await self._barrier.arrive(agent)
-            if agent in self._reset_pending:
-                decision = self._reset_pending.pop(agent)
-                best = self.state.best()
-                await self._start_epochs(
-                    "agent", {agent: best.cand_id if best else SEED_ID}, decision.reason
-                )
             await self.pacer.wait()
-            reason = self._stop_reason or self._exhausted(in_flight=self._in_flight)
-            if reason is not None:
-                self._stop_reason = reason
+            if self._barrier.pending is not None:
+                continue  # a team forget became pending while we waited: join it first
+            gate = self._budget_gate()
+            if gate == "stop":
                 await self._leave(agent)
                 return
+            if gate == "wait":
+                await asyncio.sleep(self.BUDGET_POLL_S)
+                continue
             # In flight = started but not yet counted as a proposal; judging happens after the
-            # turn is counted, so it must not hold the slot (or the turn is counted twice).
+            # turn is counted, so it must not hold the slot (or the turn is counted twice). A
+            # pending reset is applied inside the slot, right before the turn it is for.
             self._in_flight += 1
             try:
+                if not await self._apply_reset(agent):
+                    continue
                 outcome, to_judge = await self._turn(agent)
             finally:
                 self._in_flight -= 1
             if to_judge is not None:
                 await self._judge(to_judge)
+            if outcome == "fatal":
+                raise _RunStopped(self._fatal_reason or _BILLING)
             if outcome == "stop":
                 await self._leave(agent)
                 return
             self._check_triggers(agent)
+
+    def _budget_gate(self) -> BudgetGate:
+        """May a turn start now? The run stops only once counted turns have used the budget up;
+        while in-flight turns merely reserve the rest, "wait": they may still fail and give
+        their share back."""
+        if self._stop_reason is None:
+            self._stop_reason = self._exhausted(in_flight=0)
+        if self._stop_reason is not None:
+            return "stop"
+        if self._exhausted(in_flight=self._in_flight) is not None:
+            return "wait"
+        return "go"
+
+    def _stopping(self) -> bool:
+        return self._stop_reason is not None or self._exhausted(in_flight=0) is not None
+
+    async def _apply_reset(self, agent: str) -> bool:
+        """Start the agent's pending reset epoch, if any. False when the run is stopping: the
+        reset is dropped, since an epoch without a turn would only be an empty round."""
+        decision = self._reset_pending.pop(agent, None)
+        if decision is None:
+            return True
+        if self._stopping():
+            return False
+        best = self.state.best()
+        seeds = {agent: best.cand_id if best else SEED_ID}
+        await self._start_epochs("agent", seeds, decision.reason)
+        return True
 
     async def _leave(self, agent: str) -> None:
         self._active.discard(agent)
@@ -195,7 +270,12 @@ class Orchestrator:
             new_session_id=self._new_session_id,
         )
         workspace = self._workspaces[agent]
-        await asyncio.to_thread(self.materializer.render, workspace, plan.bundle)
+        try:
+            await asyncio.to_thread(self.materializer.render, workspace, plan.bundle)
+        except Exception as exc:  # the agent never ran: an error turn that cost nothing
+            failed = TurnResult(plan.session.session_id, False, "", 0.0, Usage(), (), 0.0)
+            message = f"could not render the workspace: {type(exc).__name__}: {exc}"
+            return self._error_turn(plan, replace(failed, error=message), "harness"), None
         transcript = (
             self.run_dir
             / "transcripts"
@@ -215,23 +295,28 @@ class Orchestrator:
             resets = result.rate_limit.resets_at if result.rate_limit else None
             self.emit(RateLimited(agent, resets, f"rate limited; agents resume at {resume_at:.0f}"))
             return "ok", None
+        if result.error_kind == "billing":
+            self._emit_turn(
+                plan, result, status="error", cand_id=None, lines=0, error_kind="billing"
+            )
+            self._fatal_reason = result.error or _BILLING
+            return "fatal", None
         if not result.ok:
-            self._errors[agent] += 1
-            self._emit_turn(plan, result, status="error", cand_id=None, lines=0)
-            if self._errors[agent] >= self.MAX_CONSECUTIVE_ERRORS:
-                self._stopped_by_errors.add(agent)
-                return "stop", None
-            return "ok", None
-        self._errors[agent] = 0
+            return self._error_turn(plan, result, result.error_kind), None
         self.pacer.observe(result.rate_limit)
         current = plan.current
-        snap = await asyncio.to_thread(
-            self.archive.snapshot,
-            workspace,
-            parent_sha=current.sha,
-            message=f"{agent} epoch {plan.epoch} turn {plan.turn_in_session}",
-            index_name=agent,
-        )
+        try:
+            snap = await asyncio.to_thread(
+                self.archive.snapshot,
+                workspace,
+                parent_sha=current.sha,
+                message=f"{agent} epoch {plan.epoch} turn {plan.turn_in_session}",
+                index_name=agent,
+            )
+        except Exception as exc:  # the turn ran (and cost): an error turn that keeps its cost
+            message = f"could not snapshot the workspace: {type(exc).__name__}: {exc}"
+            return self._error_turn(plan, replace(result, ok=False, error=message), "harness"), None
+        self._errors[agent] = 0
         cand_id: str | None = None
         if snap.changed_judged:
             cand_id = self.state.next_cand_id()
@@ -256,10 +341,27 @@ class Orchestrator:
         )
         return "ok", cand_id
 
+    def _error_turn(self, plan: TurnPlan, result: TurnResult, kind: str | None) -> TurnOutcome:
+        """Log a failed turn; "stop" once the agent failed MAX_CONSECUTIVE_ERRORS times in a row."""
+        self._errors[plan.agent] += 1
+        self._emit_turn(plan, result, status="error", cand_id=None, lines=0, error_kind=kind)
+        if self._errors[plan.agent] >= self.MAX_CONSECUTIVE_ERRORS:
+            self._stopped_by_errors.add(plan.agent)
+            return "stop"
+        return "ok"
+
     def _emit_turn(
-        self, plan: TurnPlan, result: TurnResult, *, status: str, cand_id: str | None, lines: int
+        self,
+        plan: TurnPlan,
+        result: TurnResult,
+        *,
+        status: str,
+        cand_id: str | None,
+        lines: int,
+        error_kind: str | None = None,
     ) -> None:
         usage, meter = result.usage, result.rate_limit
+        failed = status == "error"
         self.emit(
             TurnFinished(
                 agent=plan.agent,
@@ -279,9 +381,10 @@ class Orchestrator:
                 lines_changed=lines,
                 plateau_claim=is_plateau_claim(result.final_text),
                 duration_s=result.duration_s,
-                error=result.error if status == "error" else None,
+                error=result.error if failed else None,
                 five_hour_utilization=meter.five_hour_utilization if meter else None,
                 seven_day_utilization=meter.seven_day_utilization if meter else None,
+                error_kind=error_kind if failed else None,
             )
         )
 
@@ -329,10 +432,12 @@ class Orchestrator:
 
     async def _commit_team_forget(self, decision: ForgetDecision) -> None:
         agents = [a for a in self.agents if a in self._active]
+        for agent in agents:
+            self._reset_pending.pop(agent, None)  # the team forget supersedes them
+        if self._stopping():
+            return  # the budget is spent: a new round would have no turns (all are released)
         seeds = self._seeding.seeds(self.state, agents)
         await self._start_epochs("team", seeds, decision.reason)
-        for agent in agents:
-            self._reset_pending.pop(agent, None)
 
     # ------------------------------------------------------------------ budget
     def _elapsed(self) -> float:
@@ -354,8 +459,25 @@ class Orchestrator:
             elapsed_s=self._elapsed(),
         )
 
-    def _finish(self, reason: str) -> None:
+    # ---------------------------------------------------------------- logging
+    def _logged_config(self) -> dict[str, Any]:
+        """The resolved config for RunStarted: judge.env values hidden (they may be tokens), and
+        the task text itself even when it came from description_file (so a replay has it)."""
+        config = copy.deepcopy(self.config.resolved)
+        judge = config.get("judge")
+        if isinstance(judge, dict) and isinstance(judge.get("env"), dict):
+            judge["env"] = dict.fromkeys(judge["env"], "***")
+        task = config.get("task")
+        if isinstance(task, dict):
+            task["description"] = self.config.task.description
+        return config
+
+    def _finish(self, reason: str, status: RunStatus = "completed") -> None:
         if self.state.finished is not None:
             return
         best = self.state.best()
-        self.emit(RunFinished(reason, best.cand_id if best else None, best.score if best else None))
+        self.emit(
+            RunFinished(
+                reason, best.cand_id if best else None, best.score if best else None, status
+            )
+        )

@@ -1,8 +1,12 @@
 """The judge output contract: how a user's scoring command reports a result.
 
-A judge command reports through exactly one of:
-  1. `$LETHE_OUT/result.json` (takes precedence if the file exists), or
-  2. the last non-empty line of stdout, either a JSON object or a bare number.
+A judge command reports through exactly one channel, the one its task declares in
+`judge.output`:
+  1. "stdout" (the default): the last non-empty line of stdout, either a JSON object or a bare
+     number. No file is ever read, so code the judge runs cannot plant a verdict.
+  2. "file": `$LETHE_OUT/result.json`, a JSON object (LETHE_OUT is set only in this mode, to a
+     private directory). The runner passes its text as `result_json`, which then takes
+     precedence over stdout; exiting 0 without writing it makes the candidate invalid.
 
 JSON fields: `score` (finite number; required when valid), `valid` (bool, default true),
 `feedback` (str, shown to agents), `metrics` (object of scalars), `cases` (object mapping

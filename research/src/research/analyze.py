@@ -140,10 +140,11 @@ def _render_rounds(report: Report) -> str:
     if not report.rounds:
         return f"{title}\n(no arm has team forgets)"
     rows = [
-        [r.arm, str(r.round), str(r.n), fmt_num(r.mean_best), fmt_pct(r.change_pct)]
+        [r.arm, str(r.round), f"{r.n}/{r.runs}", fmt_num(r.mean_best), fmt_pct(r.change_pct)]
         for r in report.rounds
     ]
-    return f"{title}\n" + format_table(["arm", "round", "n", "mean best", "change"], rows)
+    table = format_table(["arm", "round", "n", "mean best", "change"], rows)
+    return f"{title}\n{table}\nn = runs that reached the round, of the arm's forgetting runs"
 
 
 def _render_traces(report: Report) -> str:

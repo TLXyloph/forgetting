@@ -133,13 +133,15 @@ def arm_table(summaries: Sequence[RunSummary], *, ref: str | None = "solo") -> l
 
 @dataclass(frozen=True)
 class RoundRow:
-    """Mean best-so-far when round `round` (1-based) ended, over `n` runs that reached it."""
+    """Mean best-so-far when round `round` (1-based) ended, over the `n` of the arm's `runs`
+    forgetting runs that reached it with a valid score."""
 
     arm: str
     round: int
     n: int
     mean_best: float
     change_pct: float | None  # against the previous round's mean; None for round 1
+    runs: int = 0  # the arm's runs with at least one team forget: n < runs flags a partial round
 
 
 def round_table(summaries: Sequence[RunSummary]) -> list[RoundRow]:
@@ -147,7 +149,8 @@ def round_table(summaries: Sequence[RunSummary]) -> list[RoundRow]:
 
     Only runs with at least one team forget take part (a run whose trigger never fired is one
     long round, not a round of a forgetting team). Runs may differ in their number of rounds,
-    which is why each row reports how many runs reached it.
+    which is why each row reports how many of the arm's forgetting runs reached it (`n` of
+    `runs`): a mean over fewer runs than the previous row's is not a like-for-like change.
     """
     direction = direction_of(summaries)
     rows: list[RoundRow] = []
@@ -164,7 +167,7 @@ def round_table(summaries: Sequence[RunSummary]) -> list[RoundRow]:
                 continue
             mean = stats.mean(ends)
             change = None if previous is None else improvement_pct(mean, previous, direction)
-            rows.append(RoundRow(arm, index + 1, len(ends), mean, change))
+            rows.append(RoundRow(arm, index + 1, len(ends), mean, change, len(forgetting)))
             previous = mean
     return rows
 

@@ -61,8 +61,10 @@ class ForgetBarrier:
         if self.pending is None or not self._active <= self._arrived:
             return
         decision, self.pending = self.pending, None
-        if self._active:
-            await self._commit(decision)
-        self._arrived.clear()
-        self._generation += 1
-        self._condition().notify_all()
+        try:
+            if self._active:
+                await self._commit(decision)
+        finally:  # a failed commit raises in the agent that ran it, but releases everyone else
+            self._arrived.clear()
+            self._generation += 1
+            self._condition().notify_all()

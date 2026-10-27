@@ -4,13 +4,15 @@ Observed line types (Claude Code 2.1.x): `system/init`, `assistant` (message.con
 type text / thinking / tool_use), `user` (tool results), `rate_limit_event`, and a final `result`.
 
 Facts the parser relies on (verified against a live CLI):
+  * `system/init` carries `apiKeySource`: "none" when the turn runs on a subscription login.
   * `result.total_cost_usd` is CUMULATIVE across `--resume`; the per-turn cost is the sum of
-    `result.model_usage_since_last_result[<model>].costUSD` (fall back to `total_cost_usd` only
-    when that field is absent).
+    `result.model_usage_since_last_result[<model>].costUSD`. When that field is absent the
+    parser falls back to `total_cost_usd` and says so (`cost_is_total`); the backend then
+    charges the growth of the session's total instead.
   * `result.usage` has input_tokens, output_tokens, cache_read_input_tokens,
     cache_creation_input_tokens, and output_tokens_details.thinking_tokens for this turn.
-  * `rate_limit_event.rate_limit_info` has `status`, `resetsAt`, and
-    `unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}`.
+  * `rate_limit_event.rate_limit_info` has `status`, `resetsAt` (of the window named by
+    `rateLimitType`), and `unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}`.
   * tool_use blocks carry `name` and `input`; file tools use `input.file_path`
     (NotebookEdit: `notebook_path`; Glob/Grep: `path` when given).
 """
@@ -46,6 +48,9 @@ class StreamSummary:
     rate_limit: RateLimitInfo | None  # from the last rate_limit_event, if any
     num_api_turns: int  # result.num_turns
     malformed_lines: int  # lines that were not valid JSON objects (ignored)
+    api_key_source: str | None = None  # system/init `apiKeySource` ("none" = subscription)
+    total_cost_usd: float | None = None  # result.total_cost_usd: cumulative over the session
+    cost_is_total: bool = False  # cost_usd fell back to total_cost_usd (no per-turn usage)
 
 
 def parse_stream(lines: Iterable[str]) -> StreamSummary:
@@ -58,6 +63,7 @@ def parse_stream(lines: Iterable[str]) -> StreamSummary:
     malformed = 0
     first_sid: str | None = None
     init_sid: str | None = None
+    key_source: str | None = None
     result: Mapping[str, Any] | None = None
     rate_limit: RateLimitInfo | None = None
     tool_calls: list[ToolCall] = []
@@ -83,9 +89,12 @@ def parse_stream(lines: Iterable[str]) -> StreamSummary:
         if first_sid is None:
             first_sid = sid
         kind = obj.get("type")
-        if kind == "system":
-            if init_sid is None and obj.get("subtype") == "init":
+        if kind == "system" and obj.get("subtype") == "init":
+            if init_sid is None:
                 init_sid = sid
+            source = _non_empty_str(obj.get("apiKeySource"))
+            if source is not None and key_source in (None, "none"):
+                key_source = source  # any init line that reports a key wins over "none"
         elif kind == "assistant":
             for block in _content_blocks(obj):
                 _collect_block(block, tool_calls, assistant_text)
@@ -111,10 +120,12 @@ def parse_stream(lines: Iterable[str]) -> StreamSummary:
             rate_limit=rate_limit,
             num_api_turns=0,
             malformed_lines=malformed,
+            api_key_source=key_source,
         )
 
     result_sid = _non_empty_str(result.get("session_id"))
     result_text = result.get("result")
+    total = _as_float(result.get("total_cost_usd"))
     return StreamSummary(
         session_id=result_sid or session_id,
         has_result=True,
@@ -126,6 +137,9 @@ def parse_stream(lines: Iterable[str]) -> StreamSummary:
         rate_limit=rate_limit,
         num_api_turns=_as_int(result.get("num_turns")) or 0,
         malformed_lines=malformed,
+        api_key_source=key_source,
+        total_cost_usd=total,
+        cost_is_total=total is not None and _since_last_result(result) is None,
     )
 
 
@@ -200,16 +214,18 @@ def _parse_rate_limit(info: Any) -> RateLimitInfo | None:
     windows = info.get("unifiedWindows")
     if not isinstance(windows, dict):
         windows = {}
+    five_hour = windows.get("five_hour")
     return RateLimitInfo(
         status=status if isinstance(status, str) else "",
-        five_hour_utilization=_utilization(windows.get("five_hour")),
-        seven_day_utilization=_utilization(windows.get("seven_day")),
+        five_hour_utilization=_window_number(five_hour, "utilization"),
+        seven_day_utilization=_window_number(windows.get("seven_day"), "utilization"),
         resets_at=_as_float(info.get("resetsAt")),
+        five_hour_resets_at=_window_number(five_hour, "resetsAt"),
     )
 
 
-def _utilization(window: Any) -> float | None:
-    return _as_float(window.get("utilization")) if isinstance(window, dict) else None
+def _window_number(window: Any, key: str) -> float | None:
+    return _as_float(window.get(key)) if isinstance(window, dict) else None
 
 
 def _since_last_result(result: Mapping[str, Any]) -> Mapping[str, Any] | None:

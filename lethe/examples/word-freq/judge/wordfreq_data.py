@@ -123,8 +123,10 @@ def noisy_text(rng: Rng, vocab: list[str], cum: list[float], words: int) -> str:
     return "".join(out)
 
 
-def build_corpus() -> str:
-    rng = Rng(zlib.crc32(b"word-freq/corpus"))
+def build_corpus(seed: int | None = None) -> str:
+    """A benchmark corpus of CORPUS_WORDS words. `seed` None gives the pinned reference corpus;
+    the judge times candidates on corpora drawn afresh for every evaluation (from LETHE_SEED)."""
+    rng = Rng(zlib.crc32(b"word-freq/corpus") if seed is None else seed)
     vocab = make_vocab(rng, VOCAB_SIZE)
     return noisy_text(rng, vocab, zipf_cumulative(len(vocab)), CORPUS_WORDS)
 

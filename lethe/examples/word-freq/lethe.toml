@@ -21,8 +21,10 @@ Evaluation, in order:
 1. A correctness gate on hidden generated cases of many kinds of text and values of `k`. Any wrong
    answer makes the candidate invalid; the feedback names the kinds of case that failed, not their
    contents.
-2. Timing. `top_words(corpus, 50)` is called on a hidden generated corpus of about 300,000 words, in
-   five separate fresh Python processes; each output is also checked. Only the call is timed.
+2. Timing. `top_words(corpus, 50)` is called in five separate fresh Python processes, each on its own
+   hidden corpus of about 300,000 words, generated afresh for every evaluation; each output is also
+   checked. Only the call is timed: the clock starts when the corpus is handed to the process (after
+   `wordfreq` has been imported) and stops when the result is back.
 
 Objective (minimize): the median wall-clock time of the five calls, in milliseconds.
 '''

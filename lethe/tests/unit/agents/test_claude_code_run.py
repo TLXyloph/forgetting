@@ -77,7 +77,7 @@ def test_success_maps_the_stream_onto_the_turn_result(
         ToolCall("Read", "/WORKSPACE/hello.txt"),
         ToolCall("Edit", "/WORKSPACE/hello.txt"),
     )
-    assert result.rate_limit == RateLimitInfo("allowed", 0.16, 0.07, 1793050200.0)
+    assert result.rate_limit == RateLimitInfo("allowed", 0.16, 0.07, 1793050200.0, 1793050200.0)
     assert result.num_api_turns == 3
     assert (result.files_read, result.edit_calls) == (1, 1)
     assert 0 < result.duration_s < 30
@@ -351,7 +351,7 @@ def test_usage_limit_is_a_rate_limit_error(
 
     assert result.ok is False
     assert result.error_kind == "rate_limit"  # wins over the process/api classes
-    assert result.rate_limit == RateLimitInfo("rejected", 1.0, 0.62, 1793050200.0)
+    assert result.rate_limit == RateLimitInfo("rejected", 1.0, 0.62, 1793050200.0, 1793050200.0)
     assert "usage limit reached" in (result.error or "")
     assert result.cost_usd == 0.0
     assert result.session_id == "5a1d0000-0000-4000-8000-000000000001"
