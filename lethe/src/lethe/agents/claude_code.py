@@ -61,6 +61,7 @@ _STDOUT_LIMIT = 64 * 1024 * 1024
 _READ_CHUNK = 64 * 1024
 _STDERR_KEEP = 64 * 1024  # bytes of stderr remembered for error messages
 _ERROR_TEXT_MAX = 2000  # characters of stderr/result text copied into TurnResult.error
+_NO_PROMPT = "no stdin data received"  # the CLI gave up waiting for the prompt (2.1.31x)
 _REAP_TIMEOUT_S = 5.0  # how long to wait for a killed process to be collected
 
 
@@ -368,9 +369,11 @@ def _classify(
     stderr_text: str,
     refuse_api_key: bool = False,
 ) -> tuple[TurnErrorKind | None, str | None]:
-    """billing > timeout > rate_limit > api > process > ok, with a short message for each failure.
+    """billing > timeout > rate_limit > api > harness > process > ok, with a short message for
+    each failure.
 
-    A rate-limit signal only fails a turn that has no result or an error result.
+    A rate-limit signal only fails a turn that has no result or an error result. "harness" is a
+    prompt that never reached the CLI: no turn ran, so the session is intact and is resumed.
     """
     source = summary.api_key_source
     if refuse_api_key and source is not None and source != "none":
@@ -385,6 +388,8 @@ def _classify(
         return "rate_limit", _head(summary.result_text) or f"rate limited (status: {status})"
     if summary.is_error:
         return "api", _head(summary.result_text) or "the API returned an error without a message"
+    if not summary.has_result and _NO_PROMPT in stderr_text:
+        return "harness", _process_message(returncode, stderr_text)
     if returncode != 0 or not summary.has_result:
         return "process", _process_message(returncode, stderr_text)
     return None, None

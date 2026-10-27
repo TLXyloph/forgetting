@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Direction = Literal["max", "min"]
-TurnErrorKind = Literal["rate_limit", "timeout", "process", "api", "billing"]
+TurnErrorKind = Literal["rate_limit", "timeout", "process", "api", "billing", "harness"]
 
 # Tool names that modify files, as reported by Claude Code's stream-json output.
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})

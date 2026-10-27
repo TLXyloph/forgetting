@@ -171,6 +171,25 @@ def test_the_prompt_is_in_the_pipe_before_the_event_loop_runs_anything_else(
     assert fake_claude.stdin == b"Improve the solver."
 
 
+def test_a_prompt_that_never_arrived_is_a_harness_error_not_a_process_failure(
+    fake_claude: Any, workspace: Path, transcript: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The CLI ran no turn, so the session is intact: a process failure would start a fresh one,
+    # which in a run without forgetting is a forget by accident.
+    fake_claude.script(stream="turn1.jsonl", stdin_wait_s=0.2)
+    monkeypatch.setattr(claude_code, "_start_stdin", lambda stdin, data: None)
+
+    async def keep_stdin_open(stdin: Any) -> None:
+        return None
+
+    monkeypatch.setattr(claude_code, "_finish_stdin", keep_stdin_open)
+
+    result = run(fake_claude.backend(), workspace, transcript)
+
+    assert result.error_kind == "harness"
+    assert result.error is not None and "no stdin data received" in result.error
+
+
 def test_a_child_that_never_reads_stdin_neither_hangs_nor_crashes_the_backend(
     fake_claude: Any, workspace: Path, transcript: Path
 ) -> None:
