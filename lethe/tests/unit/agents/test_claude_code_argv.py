@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
 
-from lethe.agents.claude_code import DEFAULT_TOOLS, ClaudeCodeBackend, ClaudeCodeOptions
+from lethe.agents.claude_code import (
+    DEFAULT_TOOLS,
+    SHELL_SANDBOX_SETTINGS,
+    ClaudeCodeBackend,
+    ClaudeCodeOptions,
+)
 from lethe.domain.types import SessionChoice
 
 SID = "11111111-2222-4333-8444-555555555555"
@@ -77,7 +83,7 @@ def test_no_isolation_adds_no_isolation_flags() -> None:
     ]
 
 
-def test_shell_appends_bash_to_the_tools() -> None:
+def test_shell_appends_a_sandboxed_bash_to_the_tools() -> None:
     assert argv(shell=True) == [
         *HEAD,
         "--permission-mode",
@@ -85,11 +91,28 @@ def test_shell_appends_bash_to_the_tools() -> None:
         "--tools",
         "Read,Edit,Write,Glob,Grep,Bash",
         *SAFE,
+        "--settings",
+        SHELL_SANDBOX_SETTINGS,
         "--model",
         "sonnet",
         "--session-id",
         SID,
     ]
+
+
+def test_the_sandbox_confines_bash_and_approves_it_without_a_person() -> None:
+    # Headless, an unsandboxed Bash call needs an approval nobody can give: even `python3` was
+    # refused (live check, CLI 2.1.311). Sandboxed, commands run with writes confined to the
+    # workspace and no network, and are approved automatically.
+    assert json.loads(SHELL_SANDBOX_SETTINGS) == {
+        "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True}
+    }
+
+
+def test_any_bash_is_sandboxed_and_no_bash_means_no_sandbox_settings() -> None:
+    assert "--settings" in argv(tools=("Read", "Bash"))  # Bash named directly, without shell
+    assert "--settings" not in argv()
+    assert "--settings" not in argv(tools=())
 
 
 def test_shell_does_not_duplicate_bash() -> None:

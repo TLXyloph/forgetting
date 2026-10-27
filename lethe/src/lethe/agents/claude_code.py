@@ -6,6 +6,10 @@ command-running tools and confines file tools to the working directory;
 `--disable-slash-commands` removes skills/commands from the context. `bare` isolation uses
 `--bare` instead of `--safe-mode` and requires ANTHROPIC_API_KEY in the environment.
 
+A shell (`shell`, or "Bash" among the tools) always runs in Claude Code's sandbox: commands are
+approved automatically, write only inside the workspace and have no network. Unsandboxed, every
+command but the most trivial needs an approval that no person is there to give.
+
 Safe isolation also keeps the subscription promise: unless `allow_api_billing` is set, `claude`
 runs without the variables that would bill an API key or a cloud provider (API_BILLING_ENV), and
 a turn whose init line still reports an API key (`apiKeySource` other than "none") is refused
@@ -32,6 +36,7 @@ from lethe.domain.types import SessionChoice, TurnErrorKind, TurnResult
 Isolation = Literal["safe", "bare", "none"]
 
 DEFAULT_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
+SHELL_SANDBOX_SETTINGS = '{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true}}'
 
 # Variables that make `claude` bill an API key or a cloud provider instead of the subscription
 # login. Safe isolation launches it without them unless `allow_api_billing` is set.
@@ -71,7 +76,7 @@ class ClaudeCodeOptions:
     model: str | None = "sonnet"
     effort: str | None = None
     tools: tuple[str, ...] = DEFAULT_TOOLS
-    shell: bool = False  # adds "Bash" to tools (runs commands on the host; opt-in)
+    shell: bool = False  # adds a sandboxed "Bash" to tools (see the module docstring; opt-in)
     isolation: Isolation = "safe"
     permission_mode: str = "acceptEdits"
     turn_timeout_s: float = 1800.0
@@ -114,6 +119,7 @@ class ClaudeCodeBackend:
          "--permission-mode", permission_mode, "--tools", ",".join(tools [+ "Bash" if shell])]
         + isolation flags (safe: --safe-mode --restricted --disable-slash-commands;
                           bare: --bare --restricted --disable-slash-commands; none: nothing)
+        + ["--settings", SHELL_SANDBOX_SETTINGS] if "Bash" is among the tools
         + ["--model", model] if model + ["--effort", effort] if effort
         + (["--resume", id] if session.resume else ["--session-id", id])
         + list(extra_args)
@@ -139,6 +145,8 @@ class ClaudeCodeBackend:
             ",".join(tools),
             *_ISOLATION_FLAGS[opts.isolation],
         ]
+        if "Bash" in tools:
+            argv += ["--settings", SHELL_SANDBOX_SETTINGS]
         if opts.model:
             argv += ["--model", opts.model]
         if opts.effort:
