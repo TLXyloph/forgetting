@@ -291,3 +291,31 @@ def test_real_matplotlib_writes_valid_png_files(experiment: Path, tmp_path: Path
         data = (out_dir / name).read_bytes()
         assert data.startswith(b"\x89PNG\r\n\x1a\n")
         assert len(data) > 5_000  # an actual drawing, not an empty canvas
+
+
+def test_the_score_axis_leaves_the_opening_drop_off_scale(make_summary: Callable[..., Any]) -> None:
+    from research.plots import score_window
+
+    # VLIW-like: the seed (147,734) would flatten the 1,100-1,300 range the arms compete in
+    runs = [
+        make_summary(
+            "solo", direction="min", final_best=1200.0, budget_usd=40.0,
+            curve=[(0.0, 147734.0), (0.3, 1800.0), (1.0, 1300.0), (5.0, 1200.0), (40.0, 1200.0)],
+        ),
+        make_summary(
+            "team", direction="min", final_best=1100.0, budget_usd=40.0,
+            curve=[(0.0, 147734.0), (0.5, 1500.0), (3.0, 1250.0), (30.0, 1100.0), (40.0, 1100.0)],
+        ),
+    ]  # fmt: skip
+
+    low, high = score_window(runs, warmup=0.05)  # best so far once $2 of $40 is spent
+
+    span = 1500.0 - 1100.0  # worst best-so-far at $2 (the team run) down to the best final
+    assert low == pytest.approx(1100.0 - 0.05 * span)
+    assert high == pytest.approx(1500.0 + 0.05 * span)
+
+
+def test_the_score_window_is_none_without_curves(make_summary: Callable[..., Any]) -> None:
+    from research.plots import score_window
+
+    assert score_window([make_summary(curve=[], final_best=None)], warmup=0.05) is None

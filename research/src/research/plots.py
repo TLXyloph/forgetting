@@ -12,13 +12,32 @@ from operator import itemgetter
 from pathlib import Path
 from typing import Any
 
-from research.summary import RunSummary
+from research.summary import RunSummary, best_at
 from research.tables import TraceRow, arm_names
 
-__all__ = ["PALETTE", "load_pyplot", "write_plots"]
+__all__ = ["PALETTE", "WARMUP", "load_pyplot", "score_window", "write_plots"]
 
 # Okabe-Ito: distinguishable under the common forms of colour blindness
 PALETTE = ("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F0E442", "#000000")
+WARMUP = 0.05  # share of the budget whose opening drop the score axis may leave off-scale
+
+
+def score_window(summaries: Sequence[RunSummary], *, warmup: float) -> tuple[float, float] | None:
+    """Score-axis limits that show where the arms compete: from every run's best so far once
+    `warmup` of the budget is spent to every run's final best, padded by 5%. The seed and the
+    first improvements (147,734 cycles on VLIW, against finals near 1,200) would otherwise
+    flatten every difference that matters. None when no run has a curve."""
+    curves = [s.curve for s in summaries if s.curve]
+    if not curves:
+        return None
+    budget = max((s.budget_usd or s.spend_usd) for s in summaries if s.curve)
+    values = []
+    for curve in curves:
+        early = best_at(curve, warmup * budget)
+        values += [curve[0][1] if early is None else early, curve[-1][1]]
+    low, high = min(values), max(values)
+    pad = 0.05 * (high - low) or 0.01 * abs(high) or 1.0
+    return low - pad, high + pad
 
 
 def load_pyplot() -> Any | None:
@@ -76,8 +95,11 @@ def _best_vs_spend(
                 alpha=1.0 if is_best else 0.35,
                 label=arm if is_best else None,
             )
+    window = score_window(summaries, warmup=WARMUP)
+    if window is not None:
+        ax.set_ylim(*window)
     ax.set_xlabel("Total dollars spent (API-equivalent USD)")
-    ax.set_ylabel("Best score so far")
+    ax.set_ylabel(f"Best score so far (first {WARMUP:.0%} of spend may be off-scale)")
     ax.set_title(f"Best score vs spend ({'higher' if higher else 'lower'} is better)")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", frameon=False)
