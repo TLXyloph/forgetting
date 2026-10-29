@@ -125,7 +125,7 @@ Unknown keys are errors.
 | --- | --- | --- |
 | `team` | `agents` (4), `peers` (`all`/`none`/`ring`), `session` (`continue`/`fresh`) | who sees whose candidates; whether sessions continue between turns |
 | `forget` | `when` ([] = never), `seed` (`best`/`hedged`), `carry_scratch` (true) | triggers, what each agent restarts from, whether notes left in the best candidate survive |
-| `agent` | `model` (`sonnet`), `effort`, `isolation` (`safe`), `shell` (false: a sandboxed Bash when true), `turn_timeout` (1800), `allow_api_billing` (false), `extra_args` | the Claude Code agent |
+| `agent` | `model` (`sonnet`), `effort`, `isolation` (`safe`), `shell` (false: a sandboxed Bash when true), `read_root` (the runs directory), `deny_read` ([]), `turn_timeout` (1800), `allow_api_billing` (false), `extra_args` | the Claude Code agent |
 | `judge` | `run`, `direction`, `timeout` (600), `build`, `concurrency` (2), `cache` (true), `output` (`stdout`), `env` | scoring |
 | `budget` | `usd` (5.0), `proposals` (0), `wall` (0), `primary` (`usd`), `pause_at_utilization` (0.95), `pause_at_weekly_utilization` (1.0) | caps: the first one reached stops the run; pause thresholds for the 5-hour and 7-day windows |
 
@@ -167,25 +167,35 @@ of the budget; the default).
     repository's history.
 - **`agent.shell = true`** adds Bash, always inside Claude Code's sandbox:
   - commands are approved automatically, write only inside the workspace and have no network;
-  - they can still read files elsewhere.
+  - commands cannot read beside the agent's workspace.
 
   Headless, an unsandboxed Bash would need an approval that no one is there to give.
 
-  **The sandbox's temp directory is shared.** Sandboxed commands always run with
-  `TMPDIR=/tmp/claude-<uid>`, and they can read and write it. That one directory is shared by every
-  sandboxed Claude Code session of your user, including other lethe runs, earlier runs and your own
-  sessions.
+  Each turn, lethe gives the sandbox `denyRead` rules for:
+  - everything beside the path from the workspace up to `agent.read_root` (default: the runs
+    directory). That covers peers' workspaces, the agent's own forgotten rounds, the run's archive
+    and logs, and other runs;
+  - the sandbox's temp directory, `/tmp/claude-<uid>`;
+  - Claude Code's logs, `~/.claude`;
+  - any `agent.deny_read` paths.
 
-  So an agent can find files that another run, or a forgotten predecessor, left there. This happened
-  once in our experiments: an agent in one run found and reused a kernel another run had left at
-  `$TMPDIR/new.py`.
+  Directories on the agents' `PATH` stay readable. Under `uv run`, `python3` lives in the
+  project's `.venv`.
 
-  Denying that directory in the sandbox settings makes every command fail, because Claude Code
-  keeps its own bookkeeping files there. lethe cannot make it private (tested with CLI 2.1.312).
+  The temp directory is `$TMPDIR` for every sandboxed Claude Code session of your user, so other
+  runs leave files there.
+  - Agents may still write there, because Claude Code keeps its own bookkeeping files there, but
+    they cannot read anything back. Python's `tempfile` still picks that directory, so a script
+    that writes a temp file and reads it back fails. Agents keep such files in their workspace
+    instead.
+  - Claude Code's other temp files go to `.lethe-tmp/` in the workspace, which is never archived.
 
-  For experiments:
-  - run one run at a time;
-  - check transcripts for reads of files that other runs wrote in the shared temp directory.
+  Verified live with CLI 2.1.312. Before this, one experiment run reused a kernel that another run
+  had left in the shared temp directory.
+
+  For experiments, also:
+  - run one run at a time (`research.matrix` takes a lock);
+  - check transcripts for anything that crossed anyway (`python -m research.leaks`).
 - **`bare`** uses `--bare` and needs `ANTHROPIC_API_KEY`. **`none`** adds no isolation.
 - **No sandbox for judged code.** Forgetting is enforced on the agents' tools, not on code the judge
   executes. Candidate code runs with your user permissions, so treat tasks like any code you run

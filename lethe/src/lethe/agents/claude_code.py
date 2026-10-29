@@ -6,9 +6,10 @@ command-running tools and confines file tools to the working directory;
 `--disable-slash-commands` removes skills/commands from the context. `bare` isolation uses
 `--bare` instead of `--safe-mode` and requires ANTHROPIC_API_KEY in the environment.
 
-A shell (`shell`, or "Bash" among the tools) always runs in Claude Code's sandbox: commands are
-approved automatically, write only inside the workspace and have no network. Unsandboxed, every
-command but the most trivial needs an approval that no person is there to give.
+A shell (`shell`, or "Bash" among the tools) always runs in Claude Code's sandbox. Its commands
+are approved automatically, write only inside the workspace, have no network, and cannot read
+beside the workspace (see `lethe.agents.sandbox`). Unsandboxed, every command but the most trivial
+needs an approval that no person is there to give.
 
 Safe isolation also keeps the subscription promise: unless `allow_api_billing` is set, `claude`
 runs without the variables that would bill an API key or a cloud provider (API_BILLING_ENV), and
@@ -31,13 +32,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Literal
 
+from lethe.agents.sandbox import PRIVATE_TMP, SHELL_SANDBOX_SETTINGS, sandbox_settings
 from lethe.agents.stream import StreamSummary, looks_rate_limited, parse_stream
 from lethe.domain.types import SessionChoice, TurnErrorKind, TurnResult
 
 Isolation = Literal["safe", "bare", "none"]
 
 DEFAULT_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep")
-SHELL_SANDBOX_SETTINGS = '{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true}}'
 
 # Variables that make `claude` bill an API key or a cloud provider instead of the subscription
 # login. Safe isolation launches it without them unless `allow_api_billing` is set.
@@ -83,6 +84,8 @@ class ClaudeCodeOptions:
     turn_timeout_s: float = 1800.0
     extra_args: tuple[str, ...] = ()
     allow_api_billing: bool = False  # safe isolation: keep the API-key variables (see run_turn)
+    read_root: str | None = None  # with a shell: hide everything beside the workspace up to here
+    deny_read: tuple[str, ...] = ()  # with a shell: more paths its commands may not read
 
 
 def pinned(options: ClaudeCodeOptions) -> ClaudeCodeOptions:
@@ -125,13 +128,20 @@ class ClaudeCodeBackend:
             return None
         return {k: v for k, v in os.environ.items() if k not in API_BILLING_ENV}
 
-    def build_argv(self, session: SessionChoice) -> list[str]:
+    def tools(self) -> list[str]:
+        """The tools the agent gets: `options.tools`, plus "Bash" when `shell`."""
+        tools = list(self.options.tools)
+        if self.options.shell and "Bash" not in tools:
+            tools.append("Bash")
+        return tools
+
+    def build_argv(self, session: SessionChoice, *, settings: str | None = None) -> list[str]:
         """Exact argv (without the prompt), in this order:
         [executable, "-p", "--output-format", "stream-json", "--verbose",
          "--permission-mode", permission_mode, "--tools", ",".join(tools [+ "Bash" if shell])]
         + isolation flags (safe: --safe-mode --restricted --disable-slash-commands;
                           bare: --bare --restricted --disable-slash-commands; none: nothing)
-        + ["--settings", SHELL_SANDBOX_SETTINGS] if "Bash" is among the tools
+        + ["--settings", settings or SHELL_SANDBOX_SETTINGS] if "Bash" is among the tools
         + ["--model", model] if model + ["--effort", effort] if effort
         + (["--resume", id] if session.resume else ["--session-id", id])
         + list(extra_args)
@@ -141,10 +151,7 @@ class ClaudeCodeBackend:
         if not isinstance(session_id, str) or _SESSION_ID.fullmatch(session_id) is None:
             raise ValueError(f"invalid session id for the claude command line: {session_id!r}")
 
-        tools = list(opts.tools)
-        if opts.shell and "Bash" not in tools:
-            tools.append("Bash")
-
+        tools = self.tools()
         argv = [
             opts.executable,
             "-p",
@@ -158,7 +165,7 @@ class ClaudeCodeBackend:
             *_ISOLATION_FLAGS[opts.isolation],
         ]
         if "Bash" in tools:
-            argv += ["--settings", SHELL_SANDBOX_SETTINGS]
+            argv += ["--settings", settings or SHELL_SANDBOX_SETTINGS]
         if opts.model:
             argv += ["--model", opts.model]
         if opts.effort:
@@ -197,7 +204,21 @@ class ClaudeCodeBackend:
         `session_id` in the result is the one reported by the stream, else `session.session_id`.
         Never raises for agent-side failures; a missing executable raises FileNotFoundError.
         """
-        argv = self.build_argv(session)
+        env, settings = self.child_env(), None
+        if "Bash" in self.tools():  # the sandbox: reads isolated, Claude Code's temp files private
+            private = workspace / PRIVATE_TMP
+            private.mkdir(exist_ok=True)
+            private.chmod(0o700)
+            settings = sandbox_settings(
+                workspace,
+                read_root=self.options.read_root,
+                uid=os.getuid(),
+                home=Path.home(),
+                deny_read=self.options.deny_read,
+                keep=(env if env is not None else os.environ).get("PATH", "").split(os.pathsep),
+            )
+            env = {**(env if env is not None else os.environ), "CLAUDE_CODE_TMPDIR": str(private)}
+        argv = self.build_argv(session, settings=settings)
         timeout_s = self.options.turn_timeout_s
         stdin_bytes = prompt.encode("utf-8", errors="replace")
 
@@ -209,7 +230,7 @@ class ClaudeCodeBackend:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=workspace,
-                env=self.child_env(),
+                env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

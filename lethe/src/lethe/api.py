@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from lethe.agents.base import AgentBackend
-from lethe.agents.claude_code import API_BILLING_ENV, ClaudeCodeBackend, pinned
+from lethe.agents.claude_code import (
+    API_BILLING_ENV,
+    ClaudeCodeBackend,
+    ClaudeCodeOptions,
+    pinned,
+)
 from lethe.config import ALWAYS_EXCLUDE, HARNESS_FILES, RunConfig, load_config
 from lethe.domain.state import RunState
 from lethe.domain.types import JudgeResult
@@ -90,6 +95,15 @@ def interrupt_on_termination() -> None:
     signal.signal(signal.SIGTERM, lambda _sig, _frame: signal.raise_signal(signal.SIGINT))
 
 
+def agent_options(config: RunConfig, runs_dir: Path) -> ClaudeCodeOptions:
+    """The Claude Code options for a run's agents: the configured ones, on the CLI binary current
+    now, with reads isolated up to `agent.read_root` (by default `runs_dir`)."""
+    options = pinned(config.agent.claude_options())
+    if options.read_root is None:
+        options = replace(options, read_root=str(Path(runs_dir).resolve()))
+    return options
+
+
 def run_task(
     config_path: Path,
     *,
@@ -129,7 +143,7 @@ def run_task(
         archive=archive,
         materializer=Materializer(archive, run_dir / "ws"),
         judge=JudgeRunner(config.judge, task_dir=config.task.config_dir),
-        backend=backend or ClaudeCodeBackend(pinned(config.agent.claude_options())),
+        backend=backend or ClaudeCodeBackend(agent_options(config, run_dir.parent)),
         store=EventStore(run_dir / "events.jsonl"),
         on_event=on_event,
     )

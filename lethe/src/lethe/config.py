@@ -23,7 +23,14 @@ from lethe.runtime.budget import BudgetSpec
 from lethe.workspace.paths import PathFilter, glob_to_regex
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-ALWAYS_EXCLUDE = (".git/**", "**/__pycache__/**", "**/*.pyc", "**/.DS_Store", ".lethe/**")
+ALWAYS_EXCLUDE = (
+    ".git/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/.DS_Store",
+    ".lethe/**",
+    ".lethe-tmp/**",  # Claude Code's private temp files in a shell agent's workspace
+)
 HARNESS_FILES = ("TASK.md", ".context/**")
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 
@@ -60,6 +67,8 @@ DEFAULTS: dict[str, Any] = {
         "turn_timeout": 1800,
         "extra_args": [],
         "allow_api_billing": False,
+        "read_root": "",
+        "deny_read": [],
     },
     "budget": {
         "usd": 5.0,
@@ -123,6 +132,8 @@ class AgentConfig:
     turn_timeout: float
     extra_args: tuple[str, ...]
     allow_api_billing: bool = False
+    read_root: Path | None = None  # None: the runs directory (see api.agent_options)
+    deny_read: tuple[Path, ...] = ()
 
     def claude_options(self) -> ClaudeCodeOptions:
         return ClaudeCodeOptions(
@@ -133,6 +144,8 @@ class AgentConfig:
             turn_timeout_s=self.turn_timeout,
             extra_args=self.extra_args,
             allow_api_billing=self.allow_api_billing,
+            read_root=None if self.read_root is None else str(self.read_root),
+            deny_read=tuple(str(path) for path in self.deny_read),
         )
 
 
@@ -213,7 +226,7 @@ def _build(cfg: dict[str, Any], config_dir: Path) -> RunConfig:
         judge=_judge(judge),
         team=_team(team),
         forget=_forget(forget),
-        agent=_agent(agent),
+        agent=_agent(agent, config_dir),
         budget=_budget(budget),
         runs_dir=(config_dir / _str(cfg["run"], "runs_dir", "run")).resolve(),
         resolved=cfg,
@@ -302,7 +315,7 @@ def _forget(f: dict[str, Any]) -> ForgetConfig:
     )
 
 
-def _agent(a: dict[str, Any]) -> AgentConfig:
+def _agent(a: dict[str, Any], config_dir: Path) -> AgentConfig:
     if a["backend"] != "claude-code":
         raise ConfigError(
             "agent.backend must be 'claude-code' (scripted backends come via the API)"
@@ -315,6 +328,10 @@ def _agent(a: dict[str, Any]) -> AgentConfig:
     if not isinstance(extra, list) or not all(isinstance(x, str) for x in extra):
         raise ConfigError("agent.extra_args must be a list of strings")
     model = _str(a, "model", "agent", allow_empty=True)
+    read_root = _str(a, "read_root", "agent", allow_empty=True)
+    deny_read = a["deny_read"]
+    if not isinstance(deny_read, list) or not all(isinstance(x, str) and x for x in deny_read):
+        raise ConfigError("agent.deny_read must be a list of paths")
     return AgentConfig(
         backend="claude-code",
         model=model or None,
@@ -324,6 +341,8 @@ def _agent(a: dict[str, Any]) -> AgentConfig:
         turn_timeout=_num(a, "turn_timeout", "agent", minimum=0, strict=True),
         extra_args=tuple(extra),
         allow_api_billing=_bool(a, "allow_api_billing", "agent"),
+        read_root=(config_dir / read_root).resolve() if read_root else None,
+        deny_read=tuple((config_dir / path).resolve() for path in deny_read),
     )
 
 

@@ -155,3 +155,28 @@ def test_allow_api_billing_defaults_to_false_and_reaches_the_claude_options(tmp_
     assert cfg.agent.claude_options().allow_api_billing is True
     with pytest.raises(ConfigError, match="allow_api_billing"):
         load_config(path, overrides={"agent": {"allow_api_billing": "yes"}})
+
+
+def test_read_isolation_defaults_and_private_temp_never_archived(tmp_path):
+    cfg = load_config(write_task(tmp_path, MINIMAL))
+    assert cfg.agent.read_root is None  # run_task then uses the runs directory
+    assert cfg.agent.deny_read == ()
+    assert ".lethe-tmp/**" in cfg.task.exclude
+
+
+def test_read_isolation_paths_resolve_against_the_config_dir(tmp_path):
+    overrides = {"agent": {"read_root": "..", "deny_read": ["docs", "/abs/notes"]}}
+    cfg = load_config(write_task(tmp_path, MINIMAL), overrides=overrides)
+    assert cfg.agent.read_root == tmp_path.parent.resolve()
+    assert cfg.agent.deny_read == ((tmp_path / "docs").resolve(), Path("/abs/notes"))
+    options = cfg.agent.claude_options()
+    assert options.read_root == str(tmp_path.parent.resolve())
+    assert options.deny_read == (str((tmp_path / "docs").resolve()), "/abs/notes")
+
+
+def test_invalid_read_isolation_settings_are_rejected(tmp_path):
+    path = write_task(tmp_path, MINIMAL)
+    with pytest.raises(ConfigError, match="read_root"):
+        load_config(path, overrides={"agent": {"read_root": 3}})
+    with pytest.raises(ConfigError, match="deny_read"):
+        load_config(path, overrides={"agent": {"deny_read": "docs"}})
