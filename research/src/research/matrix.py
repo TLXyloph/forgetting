@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from lethe.api import run_task
+from lethe.api import interrupt_on_termination, run_task
 from research.experiment import (
     Arm,
     Experiment,
@@ -191,6 +191,7 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = run_task) -> int
     parser.add_argument("--arms", default=None, help="comma-separated arm names (default: all)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    interrupt_on_termination()
     try:
         experiment = load_experiment(args.experiment)
         if not experiment.task.is_file():  # fail now, not as N identical failed runs

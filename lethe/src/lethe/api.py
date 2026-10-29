@@ -6,6 +6,7 @@ import asyncio
 import os
 import secrets
 import shutil
+import signal
 import statistics
 import subprocess
 import time
@@ -75,6 +76,18 @@ def config_warnings(config: RunConfig, environ: Mapping[str, str] | None = None)
                 "turns may be billed to that account"
             )
     return warnings
+
+
+def interrupt_on_termination() -> None:
+    """Make SIGTERM and Ctrl-C stop a run cleanly: the run is cancelled, ends "interrupted" and
+    kills its agents' process groups. Call it from the main thread before `run_task`.
+
+    A shell starts a background command with SIGINT ignored, and Python then installs no Ctrl-C
+    handler, so Ctrl-C did nothing; a plain SIGTERM killed lethe outright and left the agents,
+    which run in their own process groups, to finish their turns unsupervised.
+    """
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, lambda _sig, _frame: signal.raise_signal(signal.SIGINT))
 
 
 def run_task(

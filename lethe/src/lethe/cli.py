@@ -9,7 +9,14 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, TextIO
 
-from lethe.api import check_task, load_run, run_archive, run_filters, run_task
+from lethe.api import (
+    check_task,
+    interrupt_on_termination,
+    load_run,
+    run_archive,
+    run_filters,
+    run_task,
+)
 from lethe.config import ConfigError, list_presets
 from lethe.policy.prompts import format_score
 from lethe.telemetry.live import format_event
@@ -123,6 +130,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if line and not args.quiet:
             print(line, flush=True)
 
+    interrupt_on_termination()
     try:
         run_dir = run_task(
             args.config,
