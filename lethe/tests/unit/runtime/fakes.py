@@ -118,6 +118,7 @@ class Reply:
     rate_limit: RateLimitInfo | None = None
     error: str = "boom"
     delay: float = 0.0  # real seconds the turn takes
+    tool_calls: tuple[ToolCall, ...] = (ToolCall("Read", FILE), ToolCall("Edit", FILE))
 
 
 @dataclass
@@ -149,7 +150,7 @@ class FakeBackend:
             final_text=reply.text,
             cost_usd=reply.cost,
             usage=Usage(output_tokens=100),
-            tool_calls=(ToolCall("Read", "solver.txt"), ToolCall("Edit", "solver.txt")),
+            tool_calls=reply.tool_calls,
             duration_s=0.01,
             error_kind=reply.error_kind,  # type: ignore[arg-type]
             error=reply.error if reply.error_kind else None,

@@ -22,6 +22,13 @@ def test_turn_finished_from_an_old_log_has_no_error_kind():
     assert decode(json.dumps(record)).event.error_kind is None
 
 
+def test_turn_finished_from_an_old_log_has_an_unknown_tool_call_count():
+    turn = TurnFinished("a1", 1, "s1", 1, "empty", None, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, True, 1.0)
+    record = json.loads(encode(Envelope(3, 2.0, turn)))
+    del record["tool_calls"]
+    assert decode(json.dumps(record)).event.tool_calls is None  # unknown, not "made none"
+
+
 @pytest.mark.parametrize(
     "event",
     [
@@ -47,6 +54,10 @@ def test_turn_finished_from_an_old_log_has_no_error_kind():
             9.0,
             error="timed out",
             error_kind="timeout",
+            tool_calls=0,
+        ),
+        TurnFinished(
+            "a2", 1, "s3", 1, "empty", None, 0.2, 1, 2, 3, 4, 5, 6, 0, 0, True, 3.0, tool_calls=4
         ),
     ],
 )

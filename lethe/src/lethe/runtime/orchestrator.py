@@ -388,6 +388,7 @@ class Orchestrator:
                 five_hour_utilization=meter.five_hour_utilization if meter else None,
                 seven_day_utilization=meter.seven_day_utilization if meter else None,
                 error_kind=error_kind if failed else None,
+                tool_calls=len(result.tool_calls),
             )
         )
 

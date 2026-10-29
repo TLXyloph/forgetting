@@ -51,6 +51,7 @@ def turn(
     lines=4,
     claim=False,
     error_kind=None,
+    tool_calls=None,
 ):
     return TurnFinished(
         agent,
@@ -72,6 +73,7 @@ def turn(
         1.0,
         error="boom" if status == "error" else None,
         error_kind=error_kind,
+        tool_calls=tool_calls,
     )
 
 
@@ -127,6 +129,16 @@ def test_spend_proposals_and_errors(feeder):
     assert state.proposals == 1
     assert abs(state.spent_usd - 0.35) < 1e-9
     assert state.current_session("a1") is None  # last turn errored -> next turn starts fresh
+
+
+def test_turns_expose_how_many_tool_calls_they_made(feeder):
+    state, feed = feeder
+    started(feed)
+    feed(turn(n=1, status="empty", lines=0, tool_calls=0, claim=True))
+    feed(turn(n=2, status="empty", lines=0, tool_calls=7))
+    feed(turn(n=3, status="error", lines=0, error_kind="api", tool_calls=2))
+    feed(turn(n=4, status="empty", lines=0))  # a log written before tool calls were counted
+    assert [t.tool_calls for t in state.turns] == [0, 7, 2, None]
 
 
 def test_team_forget_starts_new_epoch_and_hides_old_session(feeder):

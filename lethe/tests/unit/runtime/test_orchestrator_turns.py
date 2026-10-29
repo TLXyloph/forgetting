@@ -1,5 +1,6 @@
 """Turn-level robustness: harness failures become error turns, error kinds are logged (and
-decide whether the session survives), and the logged config is safe to keep and to replay."""
+decide whether the session survives), and the logged config is safe to keep and to replay.
+Each turn also logs how many tool calls it made, which tells a passive turn from an active one."""
 
 from __future__ import annotations
 
@@ -8,11 +9,14 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fakes import FakeArchive, FakeMaterializer, Reply, build  # noqa: E402
 
-from lethe.domain.events import RunFinished, RunStarted, TurnFinished  # noqa: E402
+from lethe.domain.events import EpochStarted, RunFinished, RunStarted, TurnFinished  # noqa: E402
+from lethe.domain.types import ToolCall  # noqa: E402
 
 
 def climbing(agent, index, prompt, session):
@@ -118,3 +122,52 @@ def test_the_logged_config_hides_judge_secrets_and_keeps_the_task_text(tmp_path)
     assert started.config["task"]["description"] == "Make the number big, from a file."
     assert started.config["task"]["description_file"] == "task.txt"
     assert orch.config.resolved["judge"]["env"]["API_TOKEN"] == "s3cret-value"  # not mutated
+
+
+EXPLORED = (ToolCall("Bash"), ToolCall("Read", "solver.txt"), ToolCall("Bash"))
+
+
+def test_each_turn_logs_how_many_tool_calls_it_made(tmp_path):
+    def script(agent, index, prompt, session):
+        return [
+            Reply(value="12"),  # the default reply: a Read and an Edit
+            Reply(error_kind="api", cost=0.0, tool_calls=(ToolCall("Bash"),)),
+            Reply(value=None, text="I've plateaued.", tool_calls=()),
+            Reply(value=None, tool_calls=EXPLORED),
+        ][index]
+
+    orch, store, *_ = build(tmp_path, script, **SOLO)
+    asyncio.run(orch.run())
+
+    turns = [(t.status, t.tool_calls) for t in store.of(TurnFinished)]
+    assert turns == [("candidate", 2), ("error", 1), ("empty", 0), ("empty", 3)]
+
+
+@pytest.mark.parametrize(
+    ("passive_only", "a1_tools", "reset"),
+    [
+        (False, EXPLORED, True),  # by default every empty turn counts
+        (True, EXPLORED, False),  # exploring without submitting yet is not a stall
+        (True, (), True),  # not acting at all is
+    ],
+)
+def test_passive_only_resets_only_an_agent_that_stopped_acting(
+    tmp_path, passive_only, a1_tools, reset
+):
+    def script(agent, index, prompt, session):
+        if agent == "a1":  # never submits: works with `a1_tools`, or does nothing at all
+            return Reply(value=None, text="still measuring", tool_calls=a1_tools)
+        return Reply(value=str(20 + index))
+
+    stalled = {"type": "stalled", "n": 2, "of": 2, "passive_only": passive_only}
+    overrides = {
+        "team": {"agents": 2},
+        "forget": {"when": [stalled]},
+        "budget": {"usd": 0, "proposals": 8, "primary": "proposals"},
+    }
+    orch, store, *_ = build(tmp_path, script, **overrides)
+    asyncio.run(orch.run())
+
+    agent_epochs = [e for e in store.of(EpochStarted) if e.scope == "agent"]
+    assert bool(agent_epochs) is reset
+    assert all(set(e.epochs) == {"a1"} for e in agent_epochs)

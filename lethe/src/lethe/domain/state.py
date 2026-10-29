@@ -75,6 +75,7 @@ class TurnInfo:
     duration_s: float
     spent_after: float  # cumulative run spend once this turn is counted
     error_kind: str | None = None
+    tool_calls: int | None = None  # None: logged before tool calls were counted
 
     @property
     def ok(self) -> bool:
@@ -223,6 +224,7 @@ class RunState:
                 duration_s=event.duration_s,
                 spent_after=self.spent_usd,
                 error_kind=event.error_kind,
+                tool_calls=event.tool_calls,
             )
         )
 
