@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from research.leaks import BENIGN_KINDS, LEAK_KINDS, scan_run
+from research.leaks import BENIGN_KINDS, KINDS, LEAK_KINDS, UNVERIFIED_KINDS, scan_run
 
 MakeRun = Callable[..., Any]
 
@@ -23,11 +23,35 @@ def slug(path: Path, *, strict: bool = False) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", str(path)) if strict else str(path).replace("/", "-")
 
 
-def test_benign_and_leak_kinds_partition_the_kinds() -> None:
-    assert BENIGN_KINDS.isdisjoint(LEAK_KINDS)
+def test_leak_unverified_and_benign_kinds_partition_the_kinds() -> None:
+    assert BENIGN_KINDS.isdisjoint(LEAK_KINDS) and UNVERIFIED_KINDS.isdisjoint(LEAK_KINDS)
+    assert BENIGN_KINDS.isdisjoint(UNVERIFIED_KINDS)
+    assert set(KINDS) == BENIGN_KINDS | LEAK_KINDS | UNVERIFIED_KINDS
     assert {"temp-write", "temp-touch", "own-temp", "claude-output"} == BENIGN_KINDS
-    assert {"shared-temp", "cross-run", "cross-agent", "cross-forget"} < LEAK_KINDS
+    # a temp file no scanned agent was seen writing: no evidence that data crossed
+    assert {"shared-temp"} == UNVERIFIED_KINDS
+    assert {"cross-run", "cross-agent", "cross-forget"} < LEAK_KINDS
     assert {"other-workspace", "run-state", "other-run", "claude-logs"} < LEAK_KINDS
+
+
+def test_an_unverified_read_is_reported_but_not_counted(make_run: MakeRun) -> None:
+    t = make_run("parallel", 1, peers="none")
+    t.bash("a1", 1, "mkdir -p sw && cp $TMPDIR/sw.py sw/sw.py 2>/dev/null; ls sw", ts=1, result="")
+
+    (finding,) = scan_run(t.run_dir)
+
+    assert finding.kind == "shared-temp" and not finding.counts and not finding.benign
+
+
+def test_shell_keywords_are_not_commands_or_paths(make_run: MakeRun) -> None:
+    t = make_run("team-forget", 1)
+    t.bash(
+        "a1", 1,
+        "cd /tmp/claude-501/s/u/tasks; until grep -q done b1x.output; do sleep 5; done",
+        ts=1,
+    )  # fmt: skip
+
+    assert all(f.benign for f in scan_run(t.run_dir))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -72,16 +96,11 @@ def test_the_runs_log_archive_transcripts_and_index_are_run_state(make_run: Make
     t.read("a1", 1, t.run_dir / "events.jsonl", ts=1)
     t.bash("a1", 1, f"git --git-dir={t.run_dir}/archive.git log --oneline", ts=2)
     t.call("a1", 1, "Grep", {"pattern": "score", "path": str(t.run_dir / "transcripts")}, ts=3)
-    t.bash("a1", 1, "ls ../../../index", ts=4)
+    t.bash("a1", 1, "ls ../../../index", ts=4)  # a listing: names, no data, so no finding
 
     findings = scan_run(t.run_dir)
 
-    assert [(f.kind, f.access) for f in findings] == [
-        ("run-state", "read"),
-        ("run-state", "read"),
-        ("run-state", "read"),
-        ("run-state", "touch"),
-    ]
+    assert [(f.kind, f.access) for f in findings] == [("run-state", "read")] * 3
 
 
 def test_paths_in_other_runs_under_the_runs_root_are_other_run(
@@ -90,10 +109,10 @@ def test_paths_in_other_runs_under_the_runs_root_are_other_run(
     x = make_run("solo", 1)
     y = make_run("solo", 2)
     y.read("a1", 1, x.workspace("a1", 1) / "kernel.py", ts=1)
-    y.bash("a1", 1, f"ls {runs_root}/other-experiment", ts=2)
+    y.bash("a1", 1, f"ls {runs_root}/other-experiment", ts=2)  # a listing: no finding
     y.bash("a1", 1, "cat ../../../../rep1/events.jsonl", ts=3)
 
-    assert [f.kind for f in scan_run(y.run_dir)] == ["other-run"] * 3
+    assert [f.kind for f in scan_run(y.run_dir)] == ["other-run"] * 2
 
 
 def test_the_runs_root_can_be_given(make_run: MakeRun, tmp_path: Path) -> None:
@@ -250,4 +269,83 @@ def test_a_finding_says_who_when_what_and_where(make_run: MakeRun) -> None:
 
 def test_a_run_without_transcripts_has_no_findings(make_run: MakeRun) -> None:
     t = make_run("solo", 1)
+    assert scan_run(t.run_dir) == []
+
+
+# --- false alarms seen on E1's real transcripts ------------------------------------------------
+
+
+def test_cd_within_a_command_is_followed(make_run: MakeRun) -> None:
+    t = make_run("team-forget", 1)
+    t.bash("a1", 1, "cd .context/peers/branch3; diff best/k.py ../../../k.py", ts=1)
+    t.bash("a1", 1, "cd .context && wc -l ../k.py", ts=2)
+
+    assert scan_run(t.run_dir) == []
+
+
+def test_the_shells_directory_carries_over_between_calls_in_a_turn(make_run: MakeRun) -> None:
+    t = make_run("team-forget", 1)
+    t.bash("a1", 1, "cd .context/peers", ts=1)
+    t.bash("a1", 1, "diff branch1/best/k.py ../../k.py", ts=2)
+    t.bash("a1", 1, "cd ..", ts=3)  # leaves the workspace: Claude Code resets the directory
+    t.bash("a1", 1, "cat k.py", ts=4)
+
+    assert scan_run(t.run_dir) == []
+
+
+def test_a_cd_out_of_the_workspace_that_reads_something_is_still_found(make_run: MakeRun) -> None:
+    t = make_run("team-forget", 1)
+    t.bash("a1", 2, "cd ..; cat e1/notes.md", ts=1, result="tuned VK=12 ...")
+
+    findings = scan_run(t.run_dir)
+
+    assert [(f.kind, f.access) for f in findings] == [("other-workspace", "read")]
+    assert findings[0].path.endswith("/ws/a1/e1/notes.md")
+
+
+def test_a_copy_into_the_temp_dir_is_a_write_despite_a_redirection(make_run: MakeRun) -> None:
+    t = make_run("parallel", 1, peers="none")
+    t.bash("a1", 1, "cp perf_takehome.py $TMPDIR/bak.py 2>/dev/null; echo ok", ts=1)
+
+    assert [(f.kind, f.access) for f in scan_run(t.run_dir)] == [("temp-write", "write")]
+
+
+def test_an_access_whose_result_says_it_failed_is_not_a_finding(make_run: MakeRun) -> None:
+    t = make_run("parallel", 1, peers="none")
+    failed = "python3: can't open file '/tmp/claude-501/ed.py': [Errno 2] No such file or directory"
+    t.bash("a1", 1, "python3 /tmp/claude-501/ed.py; python3 tests/t.py", ts=1, result=failed)
+    t.bash(
+        "a1",
+        1,
+        "cat ../../a2/e1/x.py",
+        ts=2,
+        result="cat: ../../a2/e1/x.py: Operation not permitted",
+    )
+
+    assert scan_run(t.run_dir) == []
+
+
+def test_a_bare_climb_names_a_directory_and_listing_outside_is_no_leak(make_run: MakeRun) -> None:
+    t = make_run("team-forget", 1)
+    t.bash("a1", 1, "python - <<'EOF'\nimport sys; sys.path.insert(0, '..')\nEOF", ts=1)
+    t.bash("a1", 1, "ls ..; ls ../..", ts=2, result="e1\ne2")
+    t.bash("a1", 1, "grep -rn VK ..", ts=3, result="../e0/k.py: VK = 12")
+
+    findings = scan_run(t.run_dir)
+
+    assert [(f.kind, f.access) for f in findings] == [("other-workspace", "read")]
+
+
+def test_reading_claude_codes_own_task_output_through_a_glob_is_benign(make_run: MakeRun) -> None:
+    t = make_run("team-forget", 1)
+    t.bash("a1", 1, "cat /private/tmp/claude-501/*/*/tasks/b9a49fcyi.output", ts=1)
+
+    assert [f.kind for f in scan_run(t.run_dir)] == ["claude-output"]
+
+
+def test_a_cd_into_the_own_workspace_by_absolute_path_stays_inside(make_run: MakeRun) -> None:
+    t = make_run("clean-forget", 1)
+    ws = t.workspace("a2", 1)
+    t.bash("a2", 1, f"cd {ws} && python3 - <<'EOF'\nn = 3  # nodes 0 .. n-1\nEOF", ts=1)
+
     assert scan_run(t.run_dir) == []

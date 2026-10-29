@@ -21,11 +21,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from research.leak_paths import Access, canonical, is_within, temp_key, tool_paths
+from research.leak_paths import Access, bash_walk, canonical, is_within, temp_key, tool_paths
 from research.runs import EVENTS_FILE
 
 __all__ = [
     "BENIGN_KINDS",
+    "UNVERIFIED_KINDS",
     "KINDS",
     "LEAK_KINDS",
     "TEMP_PREFIX",
@@ -45,12 +46,19 @@ KINDS: tuple[LeakKind, ...] = (
     "run-state", "claude-logs", "temp-write", "temp-touch", "own-temp", "claude-output",
 )  # fmt: skip
 BENIGN_KINDS: frozenset[LeakKind] = frozenset(KINDS[-4:])
-LEAK_KINDS: frozenset[LeakKind] = frozenset(KINDS[:-4])
+# a read of a temp file no scanned agent was seen writing: no evidence that data crossed (it is
+# often a copy that failed silently); reported, not counted. Read isolation refuses such reads.
+UNVERIFIED_KINDS: frozenset[LeakKind] = frozenset({"shared-temp"})
+LEAK_KINDS: frozenset[LeakKind] = frozenset(KINDS[:-4]) - UNVERIFIED_KINDS
 
 TEMP_PREFIX = "$TMPDIR/"  # how findings show files in the shared temp directory
 _CLAUDE_DIR = re.compile(r"(?:/(?:Users|home)/[^/]+|/root)/\.claude(?:/|$)")
 _WORKSPACE = re.compile(r"(.+)/ws/[^/]+/e[0-9]+/*")
 _EPOCH_DIR = re.compile(r"e([0-9]+)")
+_TASK_OUTPUT = re.compile(r"(?:^|/)tasks/[A-Za-z0-9]+\.output$")  # Claude Code's background tasks
+# what a tool result says when the file it names could not be opened
+_FAILED = ("No such file or directory", "Operation not permitted", "Permission denied",
+           "Not a directory", "can't open file")  # fmt: skip
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +81,11 @@ class LeakFinding:
     @property
     def benign(self) -> bool:
         return self.kind in BENIGN_KINDS
+
+    @property
+    def counts(self) -> bool:
+        """Whether this is a leak: data crossed a boundary (neither benign nor unverified)."""
+        return self.kind in LEAK_KINDS
 
 
 def natural_key(name: str) -> list[tuple[str, int]]:
@@ -207,18 +220,19 @@ class RunScan:
     def classify(
         self, raw: str, access: Access, agent: str, epoch: int
     ) -> tuple[LeakKind, str] | None:
-        """(kind, path shown) of a path the agent named; None inside its own workspace and for
-        paths in no category (system files, say)."""
+        """(kind, path shown) of a path the agent named; None inside its own workspace, for paths
+        in no category (system files, say), and for a listing beside the workspace (names, no
+        data)."""
         own = f"ws/{agent}/e{epoch}"
         path = canonical(raw if raw.startswith("/") else f"{self.roots[0]}/{own}/{raw}")
         for root in self.roots:
             if is_within(path, root):
                 rel = path[len(root) :].strip("/")
-                if is_within(rel, own):
+                if is_within(rel, own) or access == "touch":
                     return None
                 return ("other-workspace" if is_within(rel, "ws") else "run-state"), path
         if any(is_within(path, root) for root in self.runs_roots):
-            return "other-run", path
+            return None if access == "touch" else ("other-run", path)
         parts = set(path.split("/"))
         own_slug = not parts.isdisjoint(self.slugs(agent, epoch))
         if _CLAUDE_DIR.match(path) or is_within(path, self.claude_dir):
@@ -228,7 +242,7 @@ class RunScan:
         if key is None:
             return None
         shown = TEMP_PREFIX + key if key else TEMP_PREFIX.rstrip("/")
-        if own_slug:
+        if own_slug or _TASK_OUTPUT.search(key):
             return "claude-output", shown
         if not key or access == "touch":
             return "temp-touch", shown
@@ -245,6 +259,9 @@ class RunScan:
         transcript = path.relative_to(self.dir).as_posix()
         pending: dict[str, list[LeakFinding]] = {}  # tool_use id -> findings awaiting its result
         found: list[LeakFinding] = []
+        # where the shell may be: Claude Code keeps its directory between calls, but apparently
+        # only after a command that succeeded, which a transcript does not reliably tell
+        cwds = [""]
         try:
             with path.open("rb") as fh:
                 for line in fh:
@@ -260,38 +277,86 @@ class RunScan:
                         if kind == ("assistant", "tool_use") and isinstance(block.get("id"), str):
                             ts = _timestamp(record)
                             ts = path.stat().st_mtime if ts is None else ts
-                            calls = self._call(block, agent, epoch, ts, transcript)
+                            calls, cwds = self._call(block, agent, epoch, ts, transcript, cwds)
                             if calls:
                                 pending[block["id"]] = calls
                         elif kind == ("user", "tool_result"):
                             call_id = block.get("tool_use_id")
                             calls = pending.pop(call_id, []) if isinstance(call_id, str) else []
                             if block.get("is_error") is not True:
-                                found += calls
+                                text = _result_text(block.get("content"))
+                                found += [c for c in calls if not _failed(c.path, text)]
         except OSError as exc:
             log.warning("cannot read %s: %s", path, exc)
         return found
 
     def _call(
-        self, block: Mapping[str, Any], agent: str, epoch: int, ts: float, transcript: str
-    ) -> list[LeakFinding]:
-        """The findings of one tool_use block: one per distinct (kind, access, path)."""
+        self,
+        block: Mapping[str, Any],
+        agent: str,
+        epoch: int,
+        ts: float,
+        transcript: str,
+        cwds: list[str],
+    ) -> tuple[list[LeakFinding], list[str]]:
+        """The findings of one tool_use block, one per distinct (kind, access, path), and where
+        the shell may be after it. A command is read from every directory the shell may be in
+        (`cwds`), and only what it names from all of them is a finding."""
         name, tool_input = block.get("name"), block.get("input")
         if not isinstance(name, str) or not isinstance(tool_input, Mapping):
-            return []
-        hits: dict[tuple[LeakKind, Access, str], None] = {}  # in order, without repeats
-        for raw, access in tool_paths(name, tool_input, self.home):
-            hit = self.classify(raw, access, agent, epoch)
-            if hit is not None:
-                hits[hit[0], access, hit[1]] = None
-        if not hits:
-            return []
+            return [], cwds
         command = tool_input.get("command")
+        if name == "Bash" and isinstance(command, str):
+            spaces = [f"{root}/ws/{agent}/e{epoch}" for root in self.roots]
+            readings = [bash_walk(command, self.home, cwd, spaces) for cwd in cwds]
+            ends = [self._settled(end, agent, epoch) for _, end in readings]
+            cwds = list(dict.fromkeys([*ends, *cwds]))[:4]
+            hit_sets = [self._hits([p for p in paths], agent, epoch) for paths, _ in readings]
+            hits = {h: None for h in hit_sets[0] if all(h in other for other in hit_sets[1:])}
+        else:
+            hits = self._hits(tool_paths(name, tool_input, self.home), agent, epoch)
+        if not hits:
+            return [], cwds
         if name != "Bash" or not isinstance(command, str):
             keys = ("file_path", "notebook_path", "path", "pattern")
             named = [v for v in (tool_input.get(k) for k in keys) if isinstance(v, str)]
             command = " ".join([name, *named])
-        return [
+        findings = [
             LeakFinding(self.name, agent, epoch, ts, kind, shown, command, access, "", transcript)
             for kind, access, shown in hits
         ]
+        return findings, cwds
+
+    def _hits(
+        self, paths: Sequence[tuple[str, Access]], agent: str, epoch: int
+    ) -> dict[tuple[LeakKind, Access, str], None]:
+        hits: dict[tuple[LeakKind, Access, str], None] = {}  # in order, without repeats
+        for raw, access in paths:
+            hit = self.classify(raw, access, agent, epoch)
+            if hit is not None:
+                hits[hit[0], access, hit[1]] = None
+        return hits
+
+    def _settled(self, cwd: str, agent: str, epoch: int) -> str:
+        """Where the shell is after a command that ended in `cwd`: Claude Code puts a shell that
+        left the working directory back in it."""
+        if cwd.startswith("/"):
+            own = f"ws/{agent}/e{epoch}"
+            inside = any(is_within(canonical(cwd), f"{root}/{own}") for root in self.roots)
+            return cwd if inside else ""
+        return "" if cwd.split("/")[0] == ".." else cwd
+
+
+def _result_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text", "")) for b in content if isinstance(b, Mapping))
+    return content if isinstance(content, str) else ""
+
+
+def _failed(path: str, text: str) -> bool:
+    """Whether the result says it could not open `path` (by name) although the call succeeded:
+    `cat missing; echo done` exits 0."""
+    name = path.rstrip("/").rsplit("/", 1)[-1]
+    return bool(name) and any(
+        name in line and any(message in line for message in _FAILED) for line in text.splitlines()
+    )

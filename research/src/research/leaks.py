@@ -29,9 +29,10 @@ Kinds, `LeakFinding.kind`:
   cross-run (another run) and shared-temp (no scanned run wrote it; a file the agent's own
   program wrote is invisible here, so this one can be a false alarm).
 
-temp-touch, temp-write, own-temp and claude-output are benign (BENIGN_KINDS); the other kinds are
-leaks (LEAK_KINDS). The command prints a count per run and kind, then every leak, and exits 1
-when there is one. `research.analyze` shows the leaks per run as a validity column.
+temp-touch, temp-write, own-temp and claude-output are benign (BENIGN_KINDS); shared-temp is
+unverified (UNVERIFIED_KINDS: reported, not counted); the other kinds are leaks (LEAK_KINDS). The
+command prints a count per run and kind, then every leak and unverified read, and exits 1 when
+there is a leak. `research.analyze` shows the leaks per run as a validity column.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ from research.leak_scan import (
     KINDS,
     LEAK_KINDS,
     TEMP_PREFIX,
+    UNVERIFIED_KINDS,
     LeakFinding,
     LeakKind,
     RunScan,
@@ -65,6 +67,7 @@ __all__ = [
     "BENIGN_KINDS",
     "KINDS",
     "LEAK_KINDS",
+    "UNVERIFIED_KINDS",
     "LeakFinding",
     "LeakKind",
     "leak_counts",
@@ -209,9 +212,9 @@ def scan_experiment(
 
 
 def leak_counts(experiment_dir: Path | str) -> dict[str, int]:
-    """Leaks (findings that are not benign) per run of `experiment_dir`, keyed "<arm>/<run>"."""
+    """Leaks (findings in LEAK_KINDS) per run of `experiment_dir`, keyed "<arm>/<run>"."""
     found = scan_experiment(experiment_dir)
-    return {name: sum(not f.benign for f in findings) for name, findings in found.items()}
+    return {name: sum(f.counts for f in findings) for name, findings in found.items()}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -231,27 +234,36 @@ def _short(command: str) -> str:
     return text
 
 
+def _lines(f: LeakFinding) -> list[str]:
+    when = datetime.fromtimestamp(f.ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    detail = f" ({f.detail})" if f.detail else ""
+    return [
+        f"{f.run} {f.agent} e{f.epoch} {when} {f.kind}: {f.access} {f.path}{detail}",
+        f"    {_short(f.command)}  [{f.transcript}]",
+    ]
+
+
 def render_findings(found: Mapping[str, Sequence[LeakFinding]], *, title: str) -> str:
     """Counts per run and kind (kinds that occur), then each leak with its command."""
     kinds = [k for k in KINDS if any(f.kind == k for fs in found.values() for f in fs)]
     rows = []
     for name, findings in found.items():
         counts = Counter(f.kind for f in findings)
-        leaks = sum(not f.benign for f in findings)
+        leaks = sum(f.counts for f in findings)
         rows.append([name, str(leaks), *(str(counts[k]) for k in kinds)])
     benign = ", ".join(k for k in KINDS if k in BENIGN_KINDS)
-    sections = [f"{title}\n{format_table(['run', 'leaks', *kinds], rows)}\nbenign: {benign}"]
-    leaks = [f for findings in found.values() for f in findings if not f.benign]
+    unverified = ", ".join(k for k in KINDS if k in UNVERIFIED_KINDS)
+    sections = [
+        f"{title}\n{format_table(['run', 'leaks', *kinds], rows)}\n"
+        f"benign: {benign}; unverified (not counted): {unverified}"
+    ]
+    leaks = [f for findings in found.values() for f in findings if f.counts]
+    unsure = [f for findings in found.values() for f in findings if f.kind in UNVERIFIED_KINDS]
+    for heading, shown in (("Leaks", leaks), ("Unverified", unsure)):
+        if shown:
+            sections.append("\n".join([heading, *(line for f in shown for line in _lines(f))]))
     if leaks:
-        lines = ["Leaks"]
-        for f in leaks:
-            when = datetime.fromtimestamp(f.ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            who = f"{f.run} {f.agent} e{f.epoch} {when}"
-            detail = f" ({f.detail})" if f.detail else ""
-            lines.append(f"{who} {f.kind}: {f.access} {f.path}{detail}")
-            lines.append(f"    {_short(f.command)}  [{f.transcript}]")
-        sections.append("\n".join(lines))
-        leaky = sum(any(not f.benign for f in fs) for fs in found.values())
+        leaky = sum(any(f.counts for f in fs) for fs in found.values())
         tally = f"{_plural(len(leaks), 'leak')} in {leaky} of {_plural(len(found), 'run')}"
     else:
         tally = f"no leaks in {_plural(len(found), 'run')}"
@@ -298,7 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     title = f"Leaks in {path}: tool calls that named a path outside the agent's own workspace"
     print(render_findings(found, title=title), end="")
-    return 1 if any(not f.benign for findings in found.values() for f in findings) else 0
+    return 1 if any(f.counts for findings in found.values() for f in findings) else 0
 
 
 if __name__ == "__main__":
