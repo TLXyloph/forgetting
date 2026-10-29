@@ -24,7 +24,7 @@ PAPER_FILES = {
     "replicate-vliw-sonnet": (
         "vliw",
         {
-            "agent": {"model": "claude-sonnet-5-5", "shell": True},
+            "agent": {"model": "claude-sonnet-5-5", "shell": True, "read_root": "../../.."},
             "budget": {
                 "usd": 40,
                 "proposals": 0,
@@ -188,6 +188,8 @@ def test_vliw_replication_matches_the_paper_in_dollars_with_a_pinned_sonnet() ->
         assert config.agent.model == "claude-sonnet-5-5"  # a full id, not the moving alias
         assert config.budget.pause_at_weekly_utilization == 0.8  # a fifth of the week stays free
         assert config.agent.shell is True  # the paper's Pi agents had a shell (sandboxed here)
+        # agents' commands may not read beside their workspace anywhere in this repository
+        assert config.agent.read_root == RESEARCH.parent
 
 
 @pytest.mark.parametrize("arm", list(BETS))

@@ -12,7 +12,10 @@
 # wall-clock time. Agents get a shell, as the paper's Pi agents did, inside Claude Code's sandbox
 # (writes confined to the workspace, no network): in a file-tools-only pilot, 90% of turns ended
 # empty with the agent saying it could not run the simulator. Design, hypotheses and the analysis
-# plan: docs/replication-plan.md (findings branch).
+# plan: docs/replication-plan.md (findings branch). `read_root` (the repository root, relative to the
+# task's directory) keeps agents' commands from reading anything beside their own workspace in this
+# repository: other agents, forgotten rounds, other runs, the findings. It was added after E1 and
+# E2 ran; their transcripts were checked and show no such reads.
 #
 #   DISABLE_AUTOUPDATER=1 uv run python -m research.matrix \
 #       research/config/experiments/replicate-vliw-sonnet.toml
@@ -25,7 +28,7 @@ task = "../../tasks/vliw/lethe.toml"
 replicates = 3
 
 [overrides]
-agent = { model = "claude-sonnet-5-5", shell = true }
+agent = { model = "claude-sonnet-5-5", shell = true, read_root = "../../.." }
 budget = { usd = 40, proposals = 0, primary = "usd", pause_at_weekly_utilization = 0.8 }
 
 [[arms]]

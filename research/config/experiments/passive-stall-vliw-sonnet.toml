@@ -25,7 +25,7 @@ task = "../../tasks/vliw/lethe.toml"
 replicates = 3
 
 [overrides]
-agent = { model = "claude-sonnet-5-5", shell = true }
+agent = { model = "claude-sonnet-5-5", shell = true, read_root = "../../.." }
 budget = { usd = 40, proposals = 0, primary = "usd", pause_at_weekly_utilization = 0.8 }
 
 [[arms]]
