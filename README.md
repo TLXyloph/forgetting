@@ -170,6 +170,22 @@ of the budget; the default).
   - they can still read files elsewhere.
 
   Headless, an unsandboxed Bash would need an approval that no one is there to give.
+
+  **The sandbox's temp directory is shared.** Sandboxed commands always run with
+  `TMPDIR=/tmp/claude-<uid>`, and they can read and write it. That one directory is shared by every
+  sandboxed Claude Code session of your user, including other lethe runs, earlier runs and your own
+  sessions.
+
+  So an agent can find files that another run, or a forgotten predecessor, left there. This happened
+  once in our experiments: an agent in one run found and reused a kernel another run had left at
+  `$TMPDIR/new.py`.
+
+  Denying that directory in the sandbox settings makes every command fail, because Claude Code
+  keeps its own bookkeeping files there. lethe cannot make it private (tested with CLI 2.1.312).
+
+  For experiments:
+  - run one run at a time;
+  - check transcripts for reads of files that other runs wrote in the shared temp directory.
 - **`bare`** uses `--bare` and needs `ANTHROPIC_API_KEY`. **`none`** adds no isolation.
 - **No sandbox for judged code.** Forgetting is enforced on the agents' tools, not on code the judge
   executes. Candidate code runs with your user permissions, so treat tasks like any code you run
