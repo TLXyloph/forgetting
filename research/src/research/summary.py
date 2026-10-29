@@ -18,6 +18,8 @@ Definitions used throughout the analysis:
   credited with the spend at the end of the turn that proposed it, not at the (later, because
   judging is asynchronous) moment its judge result arrived, so the curve answers "what had
   been reached once this much was spent".
+- leaks: the one field not from the log: tool calls in the run's transcripts that crossed a
+  boundary (`research.leaks`), filled in by `research.analyze`; None when not scanned.
 """
 
 from __future__ import annotations
@@ -105,6 +107,8 @@ class RunSummary:
     # sessions an agent lost without a forget (e.g. a failed turn the harness did not resume): a
     # treatment the arm was not assigned, so the run is not a clean replicate
     unplanned_forgets: int = 0
+    # leaks found in the transcripts (research.leaks); None when they were not scanned
+    leaks: int | None = None
 
 
 def _usd_budget(config: object) -> float | None:
