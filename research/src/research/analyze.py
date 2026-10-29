@@ -1,4 +1,4 @@
-"""Analysis of an experiment directory, from the event logs alone.
+"""Analysis of an experiment directory, from the event logs (and, for leaks, the transcripts).
 
     python -m research.analyze research/runs/paper-toy-mis \
         --ref solo --compare team-forget:parallel --out out/paper-toy-mis --plots
@@ -7,7 +7,8 @@ Prints Table 1 (final best per arm), Table 2 (mean best at the end of each round
 traces, optional arm comparisons, a per-run listing, what the team forgets led to, the spend on
 empty turns and, with `--thresholds`, the cost of reaching given scores. `--out` also writes each
 table as CSV; `--plots` adds PNG plots when matplotlib is installed. Definitions of the
-quantities are in `research.summary`, `research.tables` and `research.outcomes`.
+quantities are in `research.summary`, `research.tables` and `research.outcomes`; the per-run
+listing's `leaks` column counts what `python -m research.leaks <experiment dir>` lists.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from lethe.domain.types import Direction
+from research.leaks import leak_counts
 from research.outcomes import (
     EmptyTurnRow,
     ForgetOutcomeRow,
@@ -231,16 +233,22 @@ def _render_runs(report: Report) -> str:
             str(s.proposals),
             str(s.team_forgets),
             str(s.agent_resets),
+            "-" if s.leaks is None else str(s.leaks),
             str(s.unplanned_forgets),
             "complete" if s.finished else (s.finish_reason or "no run_finished"),
         ]
         for s in report.summaries
     ]
     headers = [
-        "run", "final best", "seed", "spend $", "proposals", "forgets", "resets", "unplanned",
-        "ended",
+        "run", "final best", "seed", "spend $", "proposals", "forgets", "resets", "leaks",
+        "unplanned", "ended",
     ]  # fmt: skip
-    text = "Runs\n" + format_table(headers, rows, align="lrrrrrrrl")
+    text = "Runs\n" + format_table(headers, rows, align="lrrrrrrrrl")
+    if any(s.leaks for s in report.summaries):
+        text += (
+            "\nleaks: tool calls that crossed a boundary (another run, agent or forgotten epoch,"
+            " the run's state, Claude Code's logs); python -m research.leaks lists them"
+        )
     if any(s.unplanned_forgets for s in report.summaries):
         text += (
             "\nunplanned: sessions an agent lost without a forget (e.g. after a failed turn);"
@@ -296,6 +304,7 @@ _RUN_COLUMNS = (
     "team_forgets",
     "agent_resets",
     "unplanned_forgets",
+    "leaks",
 )
 
 
@@ -420,6 +429,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"no finished runs under {args.experiment_dir} "
                 "(--include-unfinished shows runs in progress)"
             )
+        leaks = leak_counts(args.experiment_dir)
+        summaries = [
+            dataclasses.replace(s, leaks=leaks.get(f"{s.arm}/rep{s.rep}", 0)) for s in summaries
+        ]
         report = build_report(
             summaries,
             experiment=args.experiment_dir.resolve().name,
