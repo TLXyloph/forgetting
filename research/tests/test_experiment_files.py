@@ -70,7 +70,7 @@ BETS: dict[str, tuple[str, dict[str, Any]]] = {
     ),
 }
 
-ALL_FILES = [*PAPER_FILES, "bets-toy-mis"]
+ALL_FILES = [*PAPER_FILES, "bets-toy-mis", "bets-vliw-sonnet"]
 
 
 def load(name: str) -> Experiment:
@@ -213,3 +213,41 @@ def test_lethe_accepts_every_bet_arm(arm: str) -> None:
     assert config.forget.seed == ("hedged" if arm == "hedged" else "best")
     assert config.forget.carry_scratch is (arm != "clean-forget")
     assert config.team.session == ("fresh" if arm == "fresh-every-turn" else "continue")
+
+
+# ---------------------------------------------------------------------------------------------
+# E2: bets on VLIW, against a team-forget baseline run alongside them
+# ---------------------------------------------------------------------------------------------
+
+STALLED = {"type": "stalled", "n": 3, "of": 5}
+VLIW_BETS: dict[str, tuple[str, dict[str, Any]]] = {
+    "team-forget": ("team-forget", {}),
+    "stalled": ("team", {"forget": {"when": [STALLED]}}),
+    "clean-forget": ("team-forget", {"forget": {"carry_scratch": False}}),
+    "stalled-clean": ("team", {"forget": {"carry_scratch": False, "when": [STALLED]}}),
+}
+
+
+def test_vliw_bets_cover_the_arms_in_order_with_e1s_agent_and_budget() -> None:
+    experiment = load("bets-vliw-sonnet")
+    assert experiment.name == "bets-vliw-sonnet" and experiment.replicates == 3
+    assert [a.name for a in experiment.arms] == list(VLIW_BETS)
+    for arm in experiment.arms:
+        preset, overrides = VLIW_BETS[arm.name]
+        assert (arm.preset, dict(arm.overrides)) == (preset, overrides), arm.name
+    e1 = load("replicate-vliw-sonnet")
+    assert (experiment.task, experiment.overrides) == (e1.task, e1.overrides)
+
+
+@pytest.mark.parametrize("arm", list(VLIW_BETS))
+def test_lethe_accepts_every_vliw_bet_arm(arm: str) -> None:
+    config = resolved(load("bets-vliw-sonnet"), arm)
+    assert (config.team.agents, config.team.peers) == (4, "all")
+    assert config.agent.model == "claude-sonnet-5-5" and config.agent.shell is True
+    assert (config.budget.usd, config.budget.primary) == (40, "usd")
+    stalled = arm.startswith("stalled")
+    assert [w["type"] for w in config.forget.when] == (
+        ["stalled"] if stalled else ["budget_fractions"]
+    )
+    assert config.forget.carry_scratch is ("clean" not in arm)
+    assert config.forget.seed == "best"

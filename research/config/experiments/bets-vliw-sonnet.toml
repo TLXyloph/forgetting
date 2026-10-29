@@ -1,0 +1,49 @@
+# E2: bets on the VLIW kernel task, after E1 (replicate-vliw-sonnet.toml) found that Claude
+# sessions make about ten useful proposals and then idle: 96-99% of turns were passive plateau
+# declarations, a fixed 25/50/75% schedule left each fresh team idle for most of its round, and
+# fresh agents inherited their predecessors' scratch (sweep scripts, backups) and stopped at once.
+#
+#   team-forget    the paper's method, run again alongside the bets as their baseline
+#   stalled        no schedule: an agent forgets on its own once 3 of its last 5 turns are empty
+#                  (or claim a plateau), restarting from the team's best candidate
+#   clean-forget   the paper's schedule, but each restart drops the scratch files left beside
+#                  the best candidate (the workspace is the original seed plus the best's
+#                  judged file)
+#   stalled-clean  both
+#
+# Agent and budget are E1's: claude-sonnet-5-5 with the sandboxed shell, $40 API-equivalent per
+# run, weekly pause at 80%. Hypotheses and the analysis plan: docs/e2-plan.md (findings branch).
+#
+#   for k in 1 2 3; do DISABLE_AUTOUPDATER=1 uv run python -m research.matrix \
+#       research/config/experiments/bets-vliw-sonnet.toml --replicates $k; done
+#   uv run python -m research.analyze research/runs/bets-vliw-sonnet --ref team-forget \
+#       --compare stalled:team-forget --compare clean-forget:team-forget \
+#       --compare stalled-clean:team-forget --thresholds 1200,1150,1100 --plots \
+#       --out docs/findings/e2
+
+name = "bets-vliw-sonnet"
+task = "../../tasks/vliw/lethe.toml"
+replicates = 3
+
+[overrides]
+agent = { model = "claude-sonnet-5-5", shell = true }
+budget = { usd = 40, proposals = 0, primary = "usd", pause_at_weekly_utilization = 0.8 }
+
+[[arms]]
+name = "team-forget"
+preset = "team-forget"
+
+[[arms]]
+name = "stalled"
+preset = "team"
+overrides = { forget = { when = [{ type = "stalled", n = 3, of = 5 }] } }
+
+[[arms]]
+name = "clean-forget"
+preset = "team-forget"
+overrides = { forget = { carry_scratch = false } }
+
+[[arms]]
+name = "stalled-clean"
+preset = "team"
+overrides = { forget = { carry_scratch = false, when = [{ type = "stalled", n = 3, of = 5 }] } }
