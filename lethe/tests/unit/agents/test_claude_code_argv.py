@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from lethe.agents.claude_code import (
     SHELL_SANDBOX_SETTINGS,
     ClaudeCodeBackend,
     ClaudeCodeOptions,
+    pinned,
 )
 from lethe.domain.types import SessionChoice
 
@@ -235,3 +237,30 @@ def test_session_ids_that_could_pass_for_flags_or_break_argv_are_rejected(
 @pytest.mark.parametrize("session_id", [SID, "s1", "sid-1", "agent_1.epoch2:turn3", "0"])
 def test_ordinary_session_ids_are_accepted(session_id: str) -> None:
     assert ClaudeCodeBackend().build_argv(SessionChoice(session_id, resume=False))[-1] == session_id
+
+
+def test_pinned_resolves_the_cli_to_the_versioned_binary_it_links_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Claude Code installs `claude` as a link to versions/<x.y.z>; an update re-points the link,
+    # so a run that looked `claude` up on every turn could change CLI version mid-run.
+    binary = tmp_path / "versions" / "2.1.312"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude").symlink_to(binary)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    options = pinned(ClaudeCodeOptions(model="haiku"))
+
+    assert options.executable == str(binary.resolve())
+    assert options.model == "haiku"
+
+
+def test_pinned_leaves_a_cli_it_cannot_find_to_fail_at_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert pinned(ClaudeCodeOptions()).executable == "claude"

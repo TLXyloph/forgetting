@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from lethe.agents.base import AgentBackend
-from lethe.agents.claude_code import API_BILLING_ENV, ClaudeCodeBackend
+from lethe.agents.claude_code import API_BILLING_ENV, ClaudeCodeBackend, pinned
 from lethe.config import ALWAYS_EXCLUDE, HARNESS_FILES, RunConfig, load_config
 from lethe.domain.state import RunState
 from lethe.domain.types import JudgeResult
@@ -116,7 +116,7 @@ def run_task(
         archive=archive,
         materializer=Materializer(archive, run_dir / "ws"),
         judge=JudgeRunner(config.judge, task_dir=config.task.config_dir),
-        backend=backend or ClaudeCodeBackend(config.agent.claude_options()),
+        backend=backend or ClaudeCodeBackend(pinned(config.agent.claude_options())),
         store=EventStore(run_dir / "events.jsonl"),
         on_event=on_event,
     )

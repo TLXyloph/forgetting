@@ -24,9 +24,10 @@ import logging
 import math
 import os
 import re
+import shutil
 import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Literal
 
@@ -82,6 +83,17 @@ class ClaudeCodeOptions:
     turn_timeout_s: float = 1800.0
     extra_args: tuple[str, ...] = ()
     allow_api_billing: bool = False  # safe isolation: keep the API-key variables (see run_turn)
+
+
+def pinned(options: ClaudeCodeOptions) -> ClaudeCodeOptions:
+    """`options` with the CLI resolved to the binary it currently links to.
+
+    Claude Code installs `claude` as a link to `versions/<x.y.z>` and updates by re-pointing it,
+    so resolving once, when a run starts, keeps every turn of the run on one CLI version. A CLI
+    that is not on PATH is left as given, to fail when the first turn spawns it.
+    """
+    found = shutil.which(options.executable)
+    return options if found is None else replace(options, executable=os.path.realpath(found))
 
 
 class ClaudeCodeBackend:
