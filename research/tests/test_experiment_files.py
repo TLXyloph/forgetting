@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from lethe.policy.triggers import trigger_from_dict
 from research.experiment import Experiment, arm_overrides, load_experiment
 
 RESEARCH = Path(__file__).resolve().parents[1]
@@ -70,7 +71,7 @@ BETS: dict[str, tuple[str, dict[str, Any]]] = {
     ),
 }
 
-ALL_FILES = [*PAPER_FILES, "bets-toy-mis", "bets-vliw-sonnet"]
+ALL_FILES = [*PAPER_FILES, "bets-toy-mis", "bets-vliw-sonnet", "passive-stall-vliw-sonnet"]
 
 
 def load(name: str) -> Experiment:
@@ -251,3 +252,39 @@ def test_lethe_accepts_every_vliw_bet_arm(arm: str) -> None:
     )
     assert config.forget.carry_scratch is ("clean" not in arm)
     assert config.forget.seed == "best"
+
+
+# ---------------------------------------------------------------------------------------------
+# E3: the stalled trigger counting only passive turns, against a team-forget baseline
+# ---------------------------------------------------------------------------------------------
+
+PASSIVE_STALLED = {"type": "stalled", "n": 3, "of": 5, "passive_only": True}
+PASSIVE_STALL_ARMS: dict[str, tuple[str, dict[str, Any]]] = {
+    "team-forget": ("team-forget", {}),
+    "stalled-passive": ("team", {"forget": {"when": [PASSIVE_STALLED]}}),
+}
+
+
+def test_passive_stall_covers_the_arms_in_order_with_e1s_task_agent_and_budget() -> None:
+    experiment = load("passive-stall-vliw-sonnet")
+    assert experiment.name == "passive-stall-vliw-sonnet" and experiment.replicates == 3
+    assert [a.name for a in experiment.arms] == list(PASSIVE_STALL_ARMS)
+    for arm in experiment.arms:
+        preset, overrides = PASSIVE_STALL_ARMS[arm.name]
+        assert (arm.preset, dict(arm.overrides)) == (preset, overrides), arm.name
+    e1 = load("replicate-vliw-sonnet")
+    assert (experiment.task, experiment.overrides) == (e1.task, e1.overrides)
+
+
+@pytest.mark.parametrize("arm", list(PASSIVE_STALL_ARMS))
+def test_lethe_accepts_every_passive_stall_arm(arm: str) -> None:
+    config = resolved(load("passive-stall-vliw-sonnet"), arm)
+    assert (config.team.agents, config.team.peers) == (4, "all")
+    assert config.agent.model == "claude-sonnet-5-5" and config.agent.shell is True
+    assert (config.budget.usd, config.budget.primary) == (40, "usd")
+    assert (config.forget.seed, config.forget.carry_scratch) == ("best", True)
+    if arm == "stalled-passive":
+        assert [dict(w) for w in config.forget.when] == [PASSIVE_STALLED]
+        assert trigger_from_dict(config.forget.when[0]).passive_only is True
+    else:
+        assert [w["type"] for w in config.forget.when] == ["budget_fractions"]

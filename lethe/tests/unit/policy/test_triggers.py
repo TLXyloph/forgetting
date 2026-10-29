@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from lethe.domain.events import (
@@ -35,7 +37,7 @@ class Run:
             EpochStarted("start", {a: "c0000" for a in agents}, {a: 1 for a in agents}, "start")
         )
 
-    def turn(self, agent, *, lines=10, score=None, status=None, claim=False, session="s"):
+    def turn(self, agent, *, lines=10, score=None, status=None, claim=False, session="s", tools=2):
         self.turn_no[agent] += 1
         epoch = self.state.epoch(agent)
         cid = None
@@ -68,6 +70,7 @@ class Run:
                 lines,
                 claim,
                 1.0,
+                tool_calls=tools,
             )
         )
         if cid is not None:
@@ -170,6 +173,97 @@ def test_stalled_resets_only_that_agent(feeder):
     decision = trig.check_agent(run.state, "a1", spend_fraction=0.5)
     assert decision.scope == "agent" and decision.agents == ("a1",)
     assert trig.check_agent(run.state, "a2", spend_fraction=0.5) is None
+
+
+def _fires_after_each_turn(run, trig, turns):
+    """Feed a1 `turns` (kwargs for `Run.turn`) and record, after each, whether `trig` fires."""
+    fired = []
+    for kwargs in turns:
+        run.turn("a1", **kwargs)
+        fired.append(trig.check_agent(run.state, "a1", spend_fraction=0.5) is not None)
+    return fired
+
+
+ACTIVE_EMPTY = {"status": "empty", "lines": 0, "tools": 6}  # explored, has not submitted yet
+ACTIVE_CLAIM = {"status": "empty", "lines": 0, "tools": 3, "claim": True}  # tested, then gave up
+PASSIVE_EMPTY = {"status": "empty", "lines": 0, "tools": 0}  # no tool call at all
+PASSIVE_CLAIM = {"status": "empty", "lines": 0, "tools": 0, "claim": True}
+SUBMITTED = {"score": 90.0}
+
+
+def test_stalled_passive_only_never_fires_while_the_agent_keeps_acting(feeder):
+    trig = Stalled(n=3, of=5, passive_only=True)
+    fired = _fires_after_each_turn(Run(feeder), trig, [ACTIVE_EMPTY, ACTIVE_CLAIM] * 6)
+    assert not any(fired)
+
+
+def test_stalled_passive_only_fires_once_the_agent_stops_acting(feeder):
+    run = Run(feeder)
+    trig = Stalled(n=3, of=5, passive_only=True)
+    fired = _fires_after_each_turn(
+        run, trig, [SUBMITTED, ACTIVE_EMPTY, PASSIVE_EMPTY, PASSIVE_CLAIM, PASSIVE_EMPTY]
+    )
+    assert fired == [False, False, False, False, True]
+    decision = trig.check_agent(run.state, "a1", spend_fraction=0.5)
+    assert decision.scope == "agent" and decision.agents == ("a1",)
+    assert decision.reason == (
+        "stalled: 3 of the last 5 turns were passive (empty or claimed a plateau, "
+        "with no tool call)"
+    )
+
+
+def test_stalled_passive_only_counts_passive_turns_among_active_ones(feeder):
+    trig = Stalled(n=3, of=5, passive_only=True)
+    turns = [PASSIVE_EMPTY, ACTIVE_EMPTY, PASSIVE_CLAIM, ACTIVE_EMPTY, SUBMITTED]  # 2 of 5
+    turns += [PASSIVE_EMPTY]  # the window drops a passive turn and gains one: still 2
+    turns += [PASSIVE_CLAIM]  # it drops an active turn and gains a passive one: 3 of 5
+    fired = _fires_after_each_turn(Run(feeder), trig, turns)
+    assert fired == [False] * 6 + [True]
+
+
+def test_stalled_passive_only_skips_turns_logged_without_a_tool_call_count(feeder):
+    trig = Stalled(n=1, of=1, passive_only=True)
+    unknown = {**PASSIVE_CLAIM, "tools": None}  # a log written before tool calls were counted
+    assert _fires_after_each_turn(Run(feeder), trig, [unknown, unknown]) == [False, False]
+
+
+def test_stalled_default_still_counts_every_empty_turn(feeder):
+    run = Run(feeder)
+    trig = Stalled(n=3, of=5)
+    assert trig == Stalled(n=3, of=5, passive_only=False)
+    turns = [SUBMITTED, ACTIVE_EMPTY, SUBMITTED, ACTIVE_EMPTY, ACTIVE_CLAIM]
+    assert _fires_after_each_turn(run, trig, turns) == [False] * 4 + [True]
+    assert trig.check_agent(run.state, "a1", spend_fraction=0.5).reason == (
+        "stalled: 3 of the last 5 turns were empty or claimed a plateau"
+    )
+
+
+def test_stalled_passive_only_round_trips_through_its_config_table():
+    spec = {"type": "stalled", "n": 3, "of": 5, "passive_only": True}
+    trig = trigger_from_dict(spec)
+    assert trig == Stalled(n=3, of=5, passive_only=True)
+    assert {"type": "stalled", **dataclasses.asdict(trig)} == spec
+    assert trigger_from_dict({"type": "stalled"}).passive_only is False
+    assert trigger_from_dict({**spec, "passive_only": False}) == Stalled(n=3, of=5)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"type": "stalled", "passive_only": 1},
+        {"type": "stalled", "passive_only": "yes"},
+        {"type": "stalled", "n": True},
+        {"type": "anchored", "require_stall": 0},
+    ],
+)
+def test_trigger_flags_take_booleans_and_counts_take_numbers(spec):
+    with pytest.raises(ValueError, match="invalid value"):
+        trigger_from_dict(spec)
+
+
+def test_passive_only_belongs_to_stalled_alone():
+    with pytest.raises(ValueError, match="unknown parameter"):
+        trigger_from_dict({"type": "plateau", "passive_only": True})
 
 
 def test_trigger_from_dict_builds_and_validates():

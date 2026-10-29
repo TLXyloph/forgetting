@@ -1,0 +1,38 @@
+# E3: the stalled trigger on the VLIW kernel task, counting only passive turns. E1
+# (replicate-vliw-sonnet.toml) found that without a reset trigger 96-99% of turns end empty, almost
+# all of them passive: the agent makes no tool call and declares a plateau. E2
+# (bets-vliw-sonnet.toml) reset an agent once 3 of its last 5 turns were empty or claimed a
+# plateau, but with the shell 72-79% of the empty turns it counted were active (the agent explored
+# or ran experiments and had not submitted yet), so it reset agents mid-experiment after about five
+# turns. Here a turn counts only if it was empty or claimed a plateau and made no tool call at all
+# (`passive_only`).
+#
+#   team-forget      the paper's method, run again alongside the bet as its baseline
+#   stalled-passive  no schedule: an agent forgets on its own once 3 of its last 5 turns were
+#                    passive, restarting from the team's best candidate
+#
+# Agent and budget are E1's: claude-sonnet-5-5 with the sandboxed shell, $40 API-equivalent per
+# run, weekly pause at 80%.
+#
+#   for k in 1 2 3; do DISABLE_AUTOUPDATER=1 uv run python -m research.matrix \
+#       research/config/experiments/passive-stall-vliw-sonnet.toml --replicates $k; done
+#   uv run python -m research.analyze research/runs/passive-stall-vliw-sonnet --ref team-forget \
+#       --compare stalled-passive:team-forget --thresholds 1200,1150,1100 --plots \
+#       --out docs/findings/e3
+
+name = "passive-stall-vliw-sonnet"
+task = "../../tasks/vliw/lethe.toml"
+replicates = 3
+
+[overrides]
+agent = { model = "claude-sonnet-5-5", shell = true }
+budget = { usd = 40, proposals = 0, primary = "usd", pause_at_weekly_utilization = 0.8 }
+
+[[arms]]
+name = "team-forget"
+preset = "team-forget"
+
+[[arms]]
+name = "stalled-passive"
+preset = "team"
+overrides = { forget = { when = [{ type = "stalled", n = 3, of = 5, passive_only = true }] } }

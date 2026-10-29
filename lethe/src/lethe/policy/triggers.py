@@ -132,11 +132,22 @@ class Anchored:
 
 @dataclass(frozen=True)
 class Stalled:
-    """Reset one agent when `n` of its last `of` turns were empty or claimed a plateau."""
+    """Reset one agent when `n` of its last `of` turns were empty or claimed a plateau.
+
+    With `passive_only`, such a turn counts only if it made no tool call at all: the agent
+    stopped acting. A turn that explored or ran experiments but has not submitted yet never
+    counts, and neither does one logged before tool calls were counted. The window is still the
+    agent's last `of` completed turns, so active turns in it dilute the passive ones.
+    """
 
     n: int = 3
     of: int = 5
+    passive_only: bool = False
     scope: ClassVar[str] = "agent"
+
+    def counts(self, turn: TurnInfo) -> bool:
+        idle = turn.status == "empty" or turn.plateau_claim
+        return idle and (not self.passive_only or turn.tool_calls == 0)
 
     def check_agent(
         self, state: RunState, agent: str, *, spend_fraction: float
@@ -144,10 +155,13 @@ class Stalled:
         turns = [t for t in state.epoch_turns(agent) if t.ok]
         if len(turns) < self.of:
             return None
-        stalled = sum(1 for t in turns[-self.of :] if t.status == "empty" or t.plateau_claim)
+        stalled = sum(1 for t in turns[-self.of :] if self.counts(t))
         if stalled < self.n:
             return None
-        reason = f"stalled: {stalled} of the last {self.of} turns were empty or claimed a plateau"
+        what = "empty or claimed a plateau"
+        if self.passive_only:
+            what = f"passive ({what}, with no tool call)"
+        reason = f"stalled: {stalled} of the last {self.of} turns were {what}"
         return ForgetDecision("agent", (agent,), reason)
 
 
@@ -185,8 +199,9 @@ def trigger_from_dict(spec: Mapping[str, Any]) -> Trigger:
                 "budget_fractions: fractions must be a non-empty list of numbers in (0, 1)"
             )
         return BudgetFractions(tuple(sorted(float(f) for f in fractions)))
+    flags = {f.name for f in fields(cls) if f.type in ("bool", bool)}
     for name, value in params.items():
-        if isinstance(value, bool) != (name == "require_stall") or not (
+        if isinstance(value, bool) != (name in flags) or not (
             isinstance(value, bool) or _is_number(value)
         ):
             raise ValueError(f"{kind}: parameter {name} has an invalid value {value!r}")

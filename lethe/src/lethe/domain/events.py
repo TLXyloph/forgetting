@@ -68,7 +68,11 @@ class JudgeFinished:
 
 @dataclass(frozen=True)
 class TurnFinished:
-    """One agent turn (= one proposal) ended. Emitted after the snapshot, before judging."""
+    """One agent turn (= one proposal) ended. Emitted after the snapshot, before judging.
+
+    `tool_calls` counts every tool call the turn made (0: the agent only wrote text); it is
+    None in logs written before tool calls were counted, which is "unknown", not "none".
+    """
 
     kind: ClassVar[str] = "turn_finished"
     agent: str
@@ -92,6 +96,7 @@ class TurnFinished:
     five_hour_utilization: float | None = None
     seven_day_utilization: float | None = None
     error_kind: str | None = None  # why an "error" turn failed (TurnErrorKind, or "harness")
+    tool_calls: int | None = None
 
 
 @dataclass(frozen=True)
